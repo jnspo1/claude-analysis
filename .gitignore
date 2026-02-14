@@ -1,0 +1,14 @@
+# Generated artifacts
+dashboard.html
+*.csv
+*.txt
+
+# OS files
+.DS_Store
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/

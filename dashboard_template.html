@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Code Activity Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242836;
+    --border: #2e3347;
+    --text: #e1e4ed;
+    --text-dim: #8b8fa3;
+    --accent: #6c8cff;
+    --accent2: #a78bfa;
+    --green: #4ade80;
+    --orange: #fb923c;
+    --red: #f87171;
+    --cyan: #22d3ee;
+    --pink: #f472b6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  a { color: var(--accent); }
+
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header .meta { font-size: 13px; color: var(--text-dim); }
+
+  .tabs { display: flex; gap: 0; background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; }
+  .tab { padding: 12px 20px; cursor: pointer; font-size: 14px; font-weight: 500; color: var(--text-dim); border-bottom: 2px solid transparent; transition: all 0.2s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .content { padding: 24px; max-width: 1400px; margin: 0 auto; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .card .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 4px; }
+  .card .value { font-size: 28px; font-weight: 700; }
+  .card .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+  /* Chart containers */
+  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+  .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .chart-box h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text-dim); }
+  .chart-box canvas { max-height: 300px; }
+
+  /* Explorer */
+  .explorer-controls { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .explorer-controls select, .explorer-controls input {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 12px; border-radius: 6px; font-size: 14px; min-width: 200px;
+  }
+  .explorer-controls select:focus, .explorer-controls input:focus { outline: none; border-color: var(--accent); }
+  select option { background: var(--surface2); color: var(--text); }
+
+  .session-summary { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .session-summary h2 { font-size: 16px; margin-bottom: 12px; }
+  .session-summary .prompt-text { background: var(--surface2); padding: 12px; border-radius: 6px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; margin-bottom: 12px; }
+  .meta-row { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px; color: var(--text-dim); }
+  .meta-row span { display: flex; align-items: center; gap: 4px; }
+  .meta-row .badge { background: var(--accent); color: #fff; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  @media (max-width: 900px) { .detail-grid, .charts-grid { grid-template-columns: 1fr; } }
+
+  /* Tables */
+  .table-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; }
+  .table-box h3 { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: var(--text-dim); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  td.mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
+
+  /* Tool badges */
+  .tool-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .tool-badge.Read { background: #1e3a5f; color: #60a5fa; }
+  .tool-badge.Write { background: #1a3d2e; color: var(--green); }
+  .tool-badge.Edit { background: #3d2e1a; color: var(--orange); }
+  .tool-badge.Bash { background: #3d1a2e; color: var(--pink); }
+  .tool-badge.Grep { background: #2e1a3d; color: var(--accent2); }
+  .tool-badge.Glob { background: #1a2e3d; color: var(--cyan); }
+  .tool-badge.Task, .tool-badge.TaskCreate, .tool-badge.TaskUpdate,
+  .tool-badge.TaskList, .tool-badge.TaskGet, .tool-badge.TaskOutput { background: #2d2d1a; color: #facc15; }
+  .tool-badge.WebSearch, .tool-badge.WebFetch { background: #1a3d3d; color: #2dd4bf; }
+  .tool-badge.Skill { background: #3d3d1a; color: #fde047; }
+  .tool-badge.default { background: var(--surface2); color: var(--text-dim); }
+
+  /* Subagent cards */
+  .subagent-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; }
+  .subagent-header { padding: 12px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .subagent-header:hover { background: rgba(108, 140, 255, 0.05); }
+  .subagent-header .agent-label { font-size: 13px; font-weight: 600; color: var(--accent2); }
+  .subagent-header .agent-meta { font-size: 12px; color: var(--text-dim); }
+  .subagent-body { padding: 0 16px 16px; display: none; }
+  .subagent-body.open { display: block; }
+  .subagent-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.4; }
+  .arrow { transition: transform 0.2s; display: inline-block; }
+  .arrow.open { transform: rotate(90deg); }
+
+  /* Pagination */
+  .pagination { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 12px; font-size: 13px; }
+  .pagination button { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+  .pagination button:hover { border-color: var(--accent); }
+  .pagination button:disabled { opacity: 0.3; cursor: default; }
+  .pagination .page-info { color: var(--text-dim); }
+
+  /* Filter checkboxes */
+  .filter-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+  .filter-bar label { font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text-dim); }
+  .filter-bar label:hover { color: var(--text); }
+  .filter-bar input[type="checkbox"] { accent-color: var(--accent); }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
+  .empty-state h3 { margin-bottom: 8px; color: var(--text); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Claude Code Activity Dashboard</h1>
+  <div class="meta" id="headerMeta"></div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="overview">Overview</div>
+  <div class="tab" data-tab="explorer">Task Explorer</div>
+  <div class="tab" data-tab="log">Action Log</div>
+</div>
+
+<div class="content">
+  <!-- OVERVIEW TAB -->
+  <div id="overview" class="tab-panel active">
+    <div class="cards" id="summaryCards"></div>
+    <div class="charts-grid">
+      <div class="chart-box"><h3>Tool Distribution</h3><canvas id="toolPieChart"></canvas></div>
+      <div class="chart-box"><h3>Top Projects by Actions</h3><canvas id="projectBarChart"></canvas></div>
+    </div>
+    <div class="charts-grid">
+      <div class="chart-box"><h3>Sessions Over Time</h3><canvas id="timelineChart"></canvas></div>
+      <div class="chart-box"><h3>File Types Touched</h3><canvas id="fileTypeChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- TASK EXPLORER TAB -->
+  <div id="explorer" class="tab-panel">
+    <div class="explorer-controls">
+      <select id="projectFilter"><option value="">All Projects</option></select>
+      <select id="sessionSelect"><option value="">Select a session...</option></select>
+    </div>
+
+    <div id="sessionDetail" style="display:none;">
+      <div class="session-summary">
+        <h2 id="sessionTitle"></h2>
+        <div class="prompt-text" id="promptText"></div>
+        <div class="meta-row" id="sessionMeta"></div>
+      </div>
+
+      <div class="detail-grid">
+        <div class="chart-box"><h3>Tool Breakdown</h3><canvas id="sessionToolChart"></canvas></div>
+        <div class="table-box"><h3>File Operations</h3><div id="fileOpsTable"></div></div>
+      </div>
+
+      <div class="table-box" style="margin-bottom:20px;">
+        <h3>Bash Commands</h3>
+        <div id="bashTable"></div>
+      </div>
+
+      <div id="subagentsSection"></div>
+    </div>
+
+    <div id="explorerEmpty" class="empty-state">
+      <h3>Select a session to explore</h3>
+      <p>Choose a project and session from the dropdowns above.</p>
+    </div>
+  </div>
+
+  <!-- ACTION LOG TAB -->
+  <div id="log" class="tab-panel">
+    <div id="logContent">
+      <div id="logNoSession" class="empty-state">
+        <h3>No session selected</h3>
+        <p>Select a session in the Task Explorer tab first, then come back here to see the full action log.</p>
+      </div>
+      <div id="logActive" style="display:none;">
+        <div class="filter-bar" id="toolFilters"></div>
+        <div class="table-box">
+          <table>
+            <thead><tr><th>#</th><th>Time</th><th>Tool</th><th>Detail</th><th>Source</th></tr></thead>
+            <tbody id="logTableBody"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="logPagination"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Data injected by generate_dashboard.py
+const DASHBOARD_DATA = {};
+
+// State
+let currentSession = null;
+let sessionToolChart = null;
+let logPage = 1;
+const LOG_PAGE_SIZE = 50;
+let logToolFilters = new Set();
+
+// Chart colors
+const TOOL_COLORS = {
+  Read: '#60a5fa', Write: '#4ade80', Edit: '#fb923c', Bash: '#f472b6',
+  Grep: '#a78bfa', Glob: '#22d3ee', Task: '#facc15', TaskCreate: '#facc15',
+  TaskUpdate: '#fbbf24', TaskList: '#f59e0b', TaskGet: '#d97706', TaskOutput: '#b45309',
+  WebSearch: '#2dd4bf', WebFetch: '#14b8a6', Skill: '#fde047',
+  AskUserQuestion: '#c084fc', EnterPlanMode: '#7c3aed', ExitPlanMode: '#6d28d9',
+  NotebookEdit: '#f0abfc', TaskStop: '#a3a3a3', TodoWrite: '#a3e635',
+};
+function getToolColor(name) { return TOOL_COLORS[name] || '#8b8fa3'; }
+function getToolBadgeClass(name) {
+  const known = ['Read','Write','Edit','Bash','Grep','Glob','Task','TaskCreate','TaskUpdate','TaskList','TaskGet','TaskOutput','WebSearch','WebFetch','Skill'];
+  return known.includes(name) ? name : 'default';
+}
+
+// ---- INIT ----
+document.addEventListener('DOMContentLoaded', () => {
+  if (!DASHBOARD_DATA.sessions) { document.querySelector('.content').innerHTML = '<div class="empty-state"><h3>No data</h3><p>Run generate_dashboard.py to populate this file.</p></div>'; return; }
+
+  // Header
+  const d = DASHBOARD_DATA;
+  document.getElementById('headerMeta').textContent = `Generated ${new Date(d.generated_at).toLocaleString()} | ${d.sessions.length} sessions | ${d.projects.length} projects`;
+
+  // Tabs
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  renderOverview();
+  setupExplorer();
+});
+
+// ---- OVERVIEW ----
+function renderOverview() {
+  const sessions = DASHBOARD_DATA.sessions;
+  const totalTools = sessions.reduce((s, x) => s + x.total_tools, 0);
+  const totalSubagents = sessions.reduce((s, x) => s + x.subagents.length, 0);
+  const subagentTools = sessions.reduce((s, x) => s + x.subagents.reduce((a, b) => a + b.tool_count, 0), 0);
+
+  // Date range
+  const dates = sessions.map(s => s.start_time).filter(Boolean).sort();
+  const dateRange = dates.length ? `${fmtDate(dates[0])} - ${fmtDate(dates[dates.length-1])}` : 'N/A';
+
+  document.getElementById('summaryCards').innerHTML = `
+    <div class="card"><div class="label">Sessions</div><div class="value">${sessions.length}</div><div class="sub">${dateRange}</div></div>
+    <div class="card"><div class="label">Total Actions</div><div class="value">${totalTools.toLocaleString()}</div><div class="sub">+${subagentTools.toLocaleString()} from subagents</div></div>
+    <div class="card"><div class="label">Projects</div><div class="value">${DASHBOARD_DATA.projects.length}</div></div>
+    <div class="card"><div class="label">Subagents Spawned</div><div class="value">${totalSubagents}</div></div>
+  `;
+
+  // Tool distribution pie
+  const allToolCounts = {};
+  sessions.forEach(s => {
+    Object.entries(s.tool_counts).forEach(([t, c]) => { allToolCounts[t] = (allToolCounts[t]||0) + c; });
+    s.subagents.forEach(sa => {
+      Object.entries(sa.tool_counts).forEach(([t, c]) => { allToolCounts[t] = (allToolCounts[t]||0) + c; });
+    });
+  });
+  const toolEntries = Object.entries(allToolCounts).sort((a,b) => b[1]-a[1]);
+  new Chart(document.getElementById('toolPieChart'), {
+    type: 'doughnut',
+    data: {
+      labels: toolEntries.map(e => e[0]),
+      datasets: [{ data: toolEntries.map(e => e[1]), backgroundColor: toolEntries.map(e => getToolColor(e[0])), borderWidth: 0 }]
+    },
+    options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 } } } } }
+  });
+
+  // Projects bar chart
+  const projectCounts = {};
+  sessions.forEach(s => {
+    const total = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
+    projectCounts[s.project] = (projectCounts[s.project]||0) + total;
+  });
+  const projEntries = Object.entries(projectCounts).sort((a,b) => b[1]-a[1]).slice(0, 10);
+  new Chart(document.getElementById('projectBarChart'), {
+    type: 'bar',
+    data: {
+      labels: projEntries.map(e => e[0]),
+      datasets: [{ data: projEntries.map(e => e[1]), backgroundColor: '#6c8cff', borderRadius: 4 }]
+    },
+    options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } } } }
+  });
+
+  // Timeline chart - group by week
+  const weekCounts = {};
+  sessions.forEach(s => {
+    if (!s.start_time) return;
+    const d = new Date(s.start_time);
+    const weekStart = new Date(d);
+    weekStart.setDate(d.getDate() - d.getDay());
+    const key = weekStart.toISOString().slice(0, 10);
+    weekCounts[key] = (weekCounts[key]||0) + 1;
+  });
+  const weekEntries = Object.entries(weekCounts).sort((a,b) => a[0].localeCompare(b[0]));
+  new Chart(document.getElementById('timelineChart'), {
+    type: 'line',
+    data: {
+      labels: weekEntries.map(e => fmtDate(e[0])),
+      datasets: [{ data: weekEntries.map(e => e[1]), borderColor: '#6c8cff', backgroundColor: 'rgba(108,140,255,0.1)', fill: true, tension: 0.3, pointRadius: 3 }]
+    },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
+  });
+
+  // File types chart
+  const allExtCounts = {};
+  sessions.forEach(s => {
+    Object.entries(s.file_extensions).forEach(([ext, c]) => { allExtCounts[ext] = (allExtCounts[ext]||0) + c; });
+  });
+  const extEntries = Object.entries(allExtCounts).sort((a,b) => b[1]-a[1]).slice(0, 12);
+  new Chart(document.getElementById('fileTypeChart'), {
+    type: 'bar',
+    data: {
+      labels: extEntries.map(e => e[0]),
+      datasets: [{ data: extEntries.map(e => e[1]), backgroundColor: '#a78bfa', borderRadius: 4 }]
+    },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
+  });
+}
+
+// ---- EXPLORER ----
+function setupExplorer() {
+  const projSelect = document.getElementById('projectFilter');
+  const sessSelect = document.getElementById('sessionSelect');
+
+  DASHBOARD_DATA.projects.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p; opt.textContent = p;
+    projSelect.appendChild(opt);
+  });
+
+  function populateSessions(project) {
+    sessSelect.innerHTML = '<option value="">Select a session...</option>';
+    let filtered = DASHBOARD_DATA.sessions;
+    if (project) filtered = filtered.filter(s => s.project === project);
+
+    filtered.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.session_id;
+      const date = s.start_time ? fmtDate(s.start_time) : '?';
+      const preview = s.prompt_preview || s.slug || s.session_id.slice(0, 8);
+      const totalActions = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
+      opt.textContent = `[${date}] ${preview} (${totalActions} actions)`;
+      sessSelect.appendChild(opt);
+    });
+  }
+
+  populateSessions('');
+
+  projSelect.addEventListener('change', () => {
+    populateSessions(projSelect.value);
+    hideSessionDetail();
+  });
+
+  sessSelect.addEventListener('change', () => {
+    const sid = sessSelect.value;
+    if (!sid) { hideSessionDetail(); return; }
+    const session = DASHBOARD_DATA.sessions.find(s => s.session_id === sid);
+    if (session) showSessionDetail(session);
+  });
+}
+
+function hideSessionDetail() {
+  document.getElementById('sessionDetail').style.display = 'none';
+  document.getElementById('explorerEmpty').style.display = 'block';
+  currentSession = null;
+}
+
+function showSessionDetail(s) {
+  currentSession = s;
+  document.getElementById('explorerEmpty').style.display = 'none';
+  document.getElementById('sessionDetail').style.display = 'block';
+
+  // Title
+  const title = s.slug || s.session_id.slice(0, 12);
+  document.getElementById('sessionTitle').textContent = title;
+
+  // Prompt
+  document.getElementById('promptText').textContent = s.first_prompt || '(no prompt captured)';
+
+  // Meta
+  const totalActions = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
+  const duration = (s.start_time && s.end_time) ? calcDuration(s.start_time, s.end_time) : null;
+  let metaHtml = `<span><strong>Project:</strong> ${esc(s.project)}</span>`;
+  metaHtml += `<span><strong>Date:</strong> ${s.start_time ? fmtDateTime(s.start_time) : 'N/A'}</span>`;
+  if (s.model) metaHtml += `<span><strong>Model:</strong> ${esc(s.model)}</span>`;
+  metaHtml += `<span><strong>Turns:</strong> ${s.turn_count}</span>`;
+  if (duration) metaHtml += `<span><strong>Duration:</strong> ${duration}</span>`;
+  metaHtml += `<span class="badge">${totalActions} actions</span>`;
+  if (s.subagents.length) metaHtml += `<span class="badge" style="background:var(--accent2)">${s.subagents.length} subagent${s.subagents.length>1?'s':''}</span>`;
+  document.getElementById('sessionMeta').innerHTML = metaHtml;
+
+  // Tool donut chart
+  if (sessionToolChart) sessionToolChart.destroy();
+  const tc = Object.entries(s.tool_counts).sort((a,b) => b[1]-a[1]);
+  sessionToolChart = new Chart(document.getElementById('sessionToolChart'), {
+    type: 'doughnut',
+    data: {
+      labels: tc.map(e => e[0]),
+      datasets: [{ data: tc.map(e => e[1]), backgroundColor: tc.map(e => getToolColor(e[0])), borderWidth: 0 }]
+    },
+    options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 } } } } }
+  });
+
+  // File operations table
+  const fileEntries = Object.entries(s.files_touched);
+  if (fileEntries.length) {
+    // Group by extension
+    const byExt = {};
+    fileEntries.forEach(([path, ops]) => {
+      const ext = path.split('.').pop() || '(none)';
+      if (!byExt[ext]) byExt[ext] = [];
+      byExt[ext].push({ path, ops });
+    });
+
+    let html = '<table><thead><tr><th>File</th><th>Read</th><th>Write</th><th>Edit</th></tr></thead><tbody>';
+    const sorted = Object.entries(byExt).sort((a,b) => b[1].length - a[1].length);
+    let shown = 0;
+    for (const [ext, files] of sorted) {
+      files.sort((a,b) => {
+        const aTotal = Object.values(a.ops).reduce((s,v)=>s+v,0);
+        const bTotal = Object.values(b.ops).reduce((s,v)=>s+v,0);
+        return bTotal - aTotal;
+      });
+      for (const f of files) {
+        if (shown >= 30) break;
+        const short = shortenPath(f.path);
+        html += `<tr><td class="mono" title="${esc(f.path)}">${esc(short)}</td>`;
+        html += `<td>${f.ops.Read||''}</td><td>${f.ops.Write||''}</td><td>${f.ops.Edit||''}</td></tr>`;
+        shown++;
+      }
+    }
+    if (fileEntries.length > 30) html += `<tr><td colspan="4" style="color:var(--text-dim)">...and ${fileEntries.length - 30} more files</td></tr>`;
+    html += '</tbody></table>';
+    document.getElementById('fileOpsTable').innerHTML = html;
+  } else {
+    document.getElementById('fileOpsTable').innerHTML = '<p style="color:var(--text-dim);font-size:13px;">No file operations</p>';
+  }
+
+  // Bash commands table
+  if (s.bash_commands.length) {
+    let html = '<table><thead><tr><th>Command</th><th>Count</th></tr></thead><tbody>';
+    s.bash_commands.slice(0, 25).forEach(c => {
+      html += `<tr><td class="mono">${esc(c.command)}</td><td>${c.count}</td></tr>`;
+    });
+    if (s.bash_commands.length > 25) html += `<tr><td colspan="2" style="color:var(--text-dim)">...and ${s.bash_commands.length - 25} more</td></tr>`;
+    html += '</tbody></table>';
+    document.getElementById('bashTable').innerHTML = html;
+  } else {
+    document.getElementById('bashTable').innerHTML = '<p style="color:var(--text-dim);font-size:13px;">No bash commands</p>';
+  }
+
+  // Subagents
+  const saDiv = document.getElementById('subagentsSection');
+  if (s.subagents.length) {
+    let html = '<div class="table-box"><h3>Subagents</h3>';
+    s.subagents.forEach((sa, idx) => {
+      const toolSummary = Object.entries(sa.tool_counts).map(([t,c]) => `${t}: ${c}`).join(', ');
+      html += `<div class="subagent-card">
+        <div class="subagent-header" onclick="toggleSubagent(${idx})">
+          <div><span class="agent-label">Agent ${esc(sa.agent_id)}</span> <span class="agent-meta">${sa.tool_count} actions</span></div>
+          <span class="arrow" id="saArrow${idx}">&#9654;</span>
+        </div>
+        <div class="subagent-body" id="saBody${idx}">
+          ${sa.description ? `<div class="subagent-desc">${esc(sa.description)}</div>` : ''}
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">${esc(toolSummary)}</div>
+          <table><thead><tr><th>#</th><th>Tool</th><th>Detail</th></tr></thead><tbody>`;
+      sa.tool_calls.slice(0, 30).forEach(tc => {
+        html += `<tr><td>${tc.seq}</td><td><span class="tool-badge ${getToolBadgeClass(tc.tool)}">${esc(tc.tool)}</span></td><td class="mono">${esc(tc.detail.slice(0, 120))}</td></tr>`;
+      });
+      if (sa.tool_calls.length > 30) html += `<tr><td colspan="3" style="color:var(--text-dim)">...and ${sa.tool_calls.length - 30} more</td></tr>`;
+      html += '</tbody></table></div></div>';
+    });
+    html += '</div>';
+    saDiv.innerHTML = html;
+  } else {
+    saDiv.innerHTML = '';
+  }
+
+  // Also update the action log tab
+  renderActionLog(s);
+}
+
+function toggleSubagent(idx) {
+  const body = document.getElementById('saBody' + idx);
+  const arrow = document.getElementById('saArrow' + idx);
+  body.classList.toggle('open');
+  arrow.classList.toggle('open');
+}
+
+// ---- ACTION LOG ----
+function renderActionLog(s) {
+  document.getElementById('logNoSession').style.display = 'none';
+  document.getElementById('logActive').style.display = 'block';
+
+  // Combine parent + subagent calls
+  const allCalls = [...s.tool_calls];
+  s.subagents.forEach(sa => {
+    sa.tool_calls.forEach(tc => {
+      allCalls.push({ ...tc, is_subagent: true, agent_id: sa.agent_id });
+    });
+  });
+
+  // Sort by time then sequence
+  allCalls.sort((a, b) => {
+    if (a.time && b.time) return a.time.localeCompare(b.time);
+    return 0;
+  });
+
+  // Re-number
+  allCalls.forEach((c, i) => c._seq = i + 1);
+
+  // Tool filter checkboxes
+  const toolTypes = [...new Set(allCalls.map(c => c.tool))].sort();
+  logToolFilters = new Set(toolTypes);
+  const filterDiv = document.getElementById('toolFilters');
+  filterDiv.innerHTML = '<strong style="font-size:12px;color:var(--text-dim);">Filter:</strong>';
+  toolTypes.forEach(t => {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = true; cb.dataset.tool = t;
+    cb.addEventListener('change', () => {
+      if (cb.checked) logToolFilters.add(t); else logToolFilters.delete(t);
+      logPage = 1;
+      renderLogPage(allCalls);
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + t));
+    filterDiv.appendChild(label);
+  });
+
+  logPage = 1;
+  renderLogPage(allCalls);
+}
+
+function renderLogPage(allCalls) {
+  const filtered = allCalls.filter(c => logToolFilters.has(c.tool));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / LOG_PAGE_SIZE));
+  if (logPage > totalPages) logPage = totalPages;
+
+  const start = (logPage - 1) * LOG_PAGE_SIZE;
+  const page = filtered.slice(start, start + LOG_PAGE_SIZE);
+
+  const tbody = document.getElementById('logTableBody');
+  tbody.innerHTML = '';
+  page.forEach(c => {
+    const tr = document.createElement('tr');
+    const time = c.time ? fmtTime(c.time) : '';
+    const source = c.is_subagent ? `<span style="color:var(--accent2);font-size:11px;">agent-${esc(c.agent_id || '?')}</span>` : '<span style="color:var(--text-dim);font-size:11px;">main</span>';
+    tr.innerHTML = `<td>${c._seq}</td><td class="mono">${time}</td><td><span class="tool-badge ${getToolBadgeClass(c.tool)}">${esc(c.tool)}</span></td><td class="mono" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(c.detail)}">${esc(c.detail.slice(0, 150))}</td><td>${source}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  // Pagination
+  const pagDiv = document.getElementById('logPagination');
+  pagDiv.innerHTML = `
+    <button onclick="logPageNav(-1)" ${logPage <= 1 ? 'disabled' : ''}>Prev</button>
+    <span class="page-info">Page ${logPage} of ${totalPages} (${filtered.length} actions)</span>
+    <button onclick="logPageNav(1)" ${logPage >= totalPages ? 'disabled' : ''}>Next</button>
+  `;
+
+  // Store for pagination
+  window._logAllCalls = allCalls;
+}
+
+function logPageNav(delta) {
+  logPage += delta;
+  renderLogPage(window._logAllCalls);
+}
+
+// ---- HELPERS ----
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtDate(ts) { if (!ts) return ''; try { const d = new Date(ts); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch(e) { return ts.slice(0,10); } }
+function fmtDateTime(ts) { if (!ts) return ''; try { const d = new Date(ts); return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch(e) { return ts; } }
+function fmtTime(ts) { if (!ts) return ''; try { const d = new Date(ts); return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch(e) { return ts; } }
+function shortenPath(p) {
+  const parts = p.split('/');
+  if (parts.length <= 4) return p;
+  return '.../' + parts.slice(-3).join('/');
+}
+function calcDuration(start, end) {
+  try {
+    const ms = new Date(end) - new Date(start);
+    if (ms < 0) return null;
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return '<1 min';
+    if (mins < 60) return `${mins} min`;
+    const hrs = Math.floor(mins / 60);
+    const rem = mins % 60;
+    return `${hrs}h ${rem}m`;
+  } catch(e) { return null; }
+}
+</script>
+</body>
+</html>
