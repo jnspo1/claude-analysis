@@ -1,0 +1,18 @@
+[Unit]
+Description=Claude Activity Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/python/claude_analysis
+Environment="PATH=/home/pi/python/claude_analysis/venv/bin"
+ExecStart=/home/pi/python/claude_analysis/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8202
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
