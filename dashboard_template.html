@@ -190,9 +190,9 @@
         <div class="table-box"><h3>File Operations</h3><div id="fileOpsTable"></div></div>
       </div>
 
-      <div class="table-box" style="margin-bottom:20px;">
-        <h3>Bash Commands</h3>
-        <div id="bashTable"></div>
+      <div class="detail-grid" style="margin-bottom:20px;">
+        <div class="chart-box" id="bashChartBox" style="display:none;"><h3>Bash Command Categories</h3><canvas id="bashCatChart"></canvas></div>
+        <div class="table-box"><h3>Bash Commands</h3><div id="bashTable"></div></div>
       </div>
 
       <div id="subagentsSection"></div>
@@ -232,6 +232,7 @@ const DASHBOARD_DATA = {};
 // State
 let currentSession = null;
 let sessionToolChart = null;
+let bashCatChart = null;
 let logPage = 1;
 const LOG_PAGE_SIZE = 50;
 let logToolFilters = new Set();
@@ -246,6 +247,26 @@ const TOOL_COLORS = {
   NotebookEdit: '#f0abfc', TaskStop: '#a3a3a3', TodoWrite: '#a3e635',
 };
 function getToolColor(name) { return TOOL_COLORS[name] || '#8b8fa3'; }
+
+// Bash category colors and descriptions (plain-language categories)
+const BASH_CAT_COLORS = {
+  'Version Control': '#6c8cff',
+  'Running Code': '#4ade80',
+  'Searching & Reading': '#a78bfa',
+  'File Management': '#fb923c',
+  'Testing & Monitoring': '#22d3ee',
+  'Server & System': '#f472b6',
+  'Other': '#8b8fa3',
+};
+const BASH_CAT_DESCRIPTIONS = {
+  'Version Control': 'Saving and tracking code changes',
+  'Running Code': 'Executing scripts and running programs',
+  'Searching & Reading': 'Finding files and reading content',
+  'File Management': 'Creating, moving, and organizing files',
+  'Testing & Monitoring': 'Checking connections and monitoring processes',
+  'Server & System': 'Managing services and system configuration',
+  'Other': 'Miscellaneous commands',
+};
 function getToolBadgeClass(name) {
   const known = ['Read','Write','Edit','Bash','Grep','Glob','Task','TaskCreate','TaskUpdate','TaskList','TaskGet','TaskOutput','WebSearch','WebFetch','Skill'];
   return known.includes(name) ? name : 'default';
@@ -543,20 +564,42 @@ function showSessionDetail(s) {
     document.getElementById('fileOpsTable').innerHTML = '<p style="color:var(--text-dim);font-size:13px;">No file operations</p>';
   }
 
-  // Bash commands table with category pills
+  // Bash category doughnut chart + commands table with category pills
   if (s.bash_commands.length) {
     const catSummary = s.bash_category_summary || {};
-    const activeCats = new Set(Object.keys(catSummary));
-    window._bashActiveCats = activeCats;
     window._bashCommands = s.bash_commands;
 
+    // Render doughnut chart
+    if (bashCatChart) bashCatChart.destroy();
+    const catEntries = Object.entries(catSummary).sort((a,b) => b[1]-a[1]);
+    if (catEntries.length) {
+      document.getElementById('bashChartBox').style.display = '';
+      bashCatChart = new Chart(document.getElementById('bashCatChart'), {
+        type: 'doughnut',
+        data: {
+          labels: catEntries.map(e => e[0]),
+          datasets: [{ data: catEntries.map(e => e[1]), backgroundColor: catEntries.map(e => BASH_CAT_COLORS[e[0]] || '#8b8fa3'), borderWidth: 0 }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 } } },
+            tooltip: { callbacks: { afterLabel: function(ctx) { return BASH_CAT_DESCRIPTIONS[ctx.label] || ''; } } }
+          }
+        }
+      });
+    } else {
+      document.getElementById('bashChartBox').style.display = 'none';
+    }
+
     let html = '';
-    // Category pills
+    // Category pills with tooltip descriptions
     if (Object.keys(catSummary).length > 1) {
       html += '<div class="category-pills" id="bashCatPills">';
       html += `<span class="cat-pill active" data-cat="all" onclick="filterBashCat('all')">All<span class="cat-count">${s.bash_commands.reduce((a,c)=>a+c.count,0)}</span></span>`;
       Object.entries(catSummary).forEach(([cat, cnt]) => {
-        html += `<span class="cat-pill" data-cat="${esc(cat)}" onclick="filterBashCat('${esc(cat)}')">${esc(cat)}<span class="cat-count"> ${cnt}</span></span>`;
+        const desc = BASH_CAT_DESCRIPTIONS[cat] || '';
+        html += `<span class="cat-pill" data-cat="${esc(cat)}" title="${esc(desc)}" onclick="filterBashCat('${esc(cat)}')">${esc(cat)}<span class="cat-count"> ${cnt}</span></span>`;
       });
       html += '</div>';
     }
@@ -569,6 +612,8 @@ function showSessionDetail(s) {
     document.getElementById('bashTable').innerHTML = html;
   } else {
     document.getElementById('bashTable').innerHTML = '<p style="color:var(--text-dim);font-size:13px;">No bash commands</p>';
+    document.getElementById('bashChartBox').style.display = 'none';
+    if (bashCatChart) { bashCatChart.destroy(); bashCatChart = null; }
   }
 
   // Subagents

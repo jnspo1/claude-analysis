@@ -136,43 +136,72 @@ def _extract_text_from_content(content) -> Optional[str]:
     return None
 
 
-# -- Bash command categorization --
+# -- Bash command categorization (plain-language categories) --
 BASH_CATEGORIES = {
-    "Git": re.compile(r'^(git|gh)\b'),
-    "Search": re.compile(r'^(grep|rg|find|fd|ag|ack)\b'),
-    "File Ops": re.compile(r'^(ls|cp|mv|rm|mkdir|rmdir|chmod|chown|ln|touch|stat|du|df|cat|head|tail|wc|sort|uniq|tee|tar|zip|unzip|gzip)\b'),
-    "Python": re.compile(r'^(python|python3|pip|pip3|pytest|mypy|ruff|black|isort|flake8|pylint|uvicorn)\b'),
-    "Node/NPM": re.compile(r'^(node|npm|npx|yarn|pnpm|bun|deno|tsx|tsc)\b'),
-    "Network": re.compile(r'^(curl|wget|ssh|scp|rsync|ping|nc|netstat|ss|nmap|dig|nslookup|traceroute)\b'),
-    "System": re.compile(r'^(sudo|systemctl|journalctl|service|kill|pkill|ps|top|htop|which|whereis|whoami|hostname|uname|date|env|export|source|echo|printf|sleep|docker|docker-compose)\b'),
-    "Editor": re.compile(r'^(sed|awk|vim|vi|nano|code|subl)\b'),
+    "Version Control": re.compile(r'^(git|gh)\b'),
+    "Running Code": re.compile(r'^(python|python3|pip|pip3|node|npm|npx|yarn|pytest|uvicorn|mypy|ruff|black|isort|flake8|pylint)\b'),
+    "Searching & Reading": re.compile(r'^(grep|rg|find|fd|ag|ack|ls|cat|head|tail|wc|tree|sort|uniq|tee|stat|du|df)\b'),
+    "File Management": re.compile(r'^(mkdir|rmdir|rm|mv|cp|chmod|chown|ln|touch|tar|zip|unzip|gzip)\b'),
+    "Testing & Monitoring": re.compile(r'^(curl|wget|ssh|scp|rsync|ping|nc|netstat|ss|ps|kill|pkill|top|htop|lsof|which|whereis)\b'),
+    "Server & System": re.compile(r'^(systemctl|journalctl|service|docker|docker-compose|nginx|hostname|uname|date|whoami|env|export|echo|printf|sleep|sed|awk|sqlite3)\b'),
 }
 
 
 def categorize_bash_command(command: str) -> str:
-    """Categorize a bash command string into a high-level group."""
+    """Categorize a bash command string into a plain-language group.
+
+    Handles chained commands (&&, ;), piped commands, sudo prefix,
+    env var prefixes, cd skipping, source/dot-space activation,
+    and full-path commands (./venv/bin/python).
+    """
     cmd = command.strip()
-    # Handle piped commands — categorize by the first command
-    base_cmd = cmd.split("|")[0].strip()
-    # Handle sudo prefix
-    if base_cmd.startswith("sudo "):
-        base_cmd = base_cmd[5:].strip()
-    # Handle env vars like FOO=bar command
-    while "=" in base_cmd.split()[0] if base_cmd.split() else False:
-        base_cmd = " ".join(base_cmd.split()[1:])
 
-    # Check if the piped chain contains grep/rg (search pattern)
-    if "|" in cmd:
-        pipe_parts = cmd.split("|")
-        for part in pipe_parts[1:]:
-            part_base = part.strip().split()[0] if part.strip().split() else ""
-            if part_base in ("grep", "rg", "awk", "sed"):
-                # If the first command is also search-like, categorize as Search
-                pass
+    # Split on && and ; to handle chained commands
+    segments = re.split(r'\s*&&\s*|\s*;\s*', cmd)
 
-    for category, pattern in BASH_CATEGORIES.items():
-        if pattern.search(base_cmd):
-            return category
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+
+        # Handle piped commands — take first command in pipe
+        base_cmd = segment.split("|")[0].strip()
+
+        # Strip sudo prefix
+        if base_cmd.startswith("sudo "):
+            base_cmd = base_cmd[5:].strip()
+
+        # Strip env vars like FOO=bar
+        parts = base_cmd.split()
+        while parts and "=" in parts[0]:
+            parts = parts[1:]
+        base_cmd = " ".join(parts)
+
+        if not base_cmd:
+            continue
+
+        # Skip 'cd' — just a directory change prefix
+        if base_cmd.split()[0] == "cd":
+            continue
+
+        # Handle source / dot-space activation
+        if base_cmd.startswith("source ") or base_cmd.startswith(". "):
+            if "venv" in base_cmd or "activate" in base_cmd:
+                return "Running Code"
+            return "Server & System"
+
+        # Extract basename from paths (./venv/bin/python -> python)
+        first_word = base_cmd.split()[0]
+        if "/" in first_word:
+            first_word = first_word.rsplit("/", 1)[-1]
+
+        # Match against category regex patterns
+        for category, pattern in BASH_CATEGORIES.items():
+            if pattern.search(first_word):
+                return category
+
+        # First real command (non-cd) didn't match any category
+        return "Other"
 
     return "Other"
 

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-14: Bash Category Refactoring and Command Classification Improvements
+- **Changed**: Replaced 8 technical bash categories (Git, Search, File Ops, Python, Node/NPM, Network, System, Editor) with 6 plain-language categories (Version Control, Running Code, Searching & Reading, File Management, Testing & Monitoring, Server & System) in session_parser.py for improved user understanding and task-oriented grouping.
+- **Changed**: Rewrote `categorize_bash_command()` to robustly handle edge cases: chained commands with `&&` and `;`, `cd` prefix skipping, full-path commands like `./venv/bin/python`, and venv activation patterns (both `source` and dot-space variants).
+- **Added**: Bash command category doughnut chart in dashboard_template.html alongside the existing bash commands table using the detail-grid two-column layout for balanced visualization.
+- **Added**: Color map and plain-English description tooltips for each bash category (e.g., "Running Code" displays "Executing scripts and running programs" on hover in chart legend).
+- **Changed**: Category filter pills now display description tooltips on hover to help users understand each category's purpose.
+
 #### 2026-02-14: Conversation Flow and Bash Command Categorization
 - **Added**: `_is_interrupt_message()` function to detect Claude Code tool-use interruption markers in session_parser.py.
 - **Added**: `extract_user_turns()` function to extract all user messages with metadata (text, timestamp, is_interrupt flag, turn_number) for conversation flow visualization.
