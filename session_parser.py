@@ -1,23 +1,16 @@
-#!/usr/bin/env python3
 """
-Generate a self-contained HTML dashboard showing Claude Code activity.
+Parse Claude Code JSONL session logs into structured data.
 
-Scans ~/.claude/projects/**/*.jsonl files, extracts session metadata,
-tool calls, and subagent data, then embeds everything as JSON inside
-a single HTML file that can be opened in any browser.
-
-Usage:
-    python generate_dashboard.py                    # Default: dashboard.html
-    python generate_dashboard.py -o my_report.html  # Custom output
+Extracts session metadata, tool calls, subagent data, and timing
+information from ~/.claude/projects/**/*.jsonl files. Used by the
+FastAPI dashboard (app.py).
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
-import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -92,13 +85,21 @@ def count_turns(jsonl_path: Path) -> int:
 
 
 def extract_session_metadata(jsonl_path: Path) -> Dict[str, Any]:
-    """Extract slug, model, timestamps, and token usage from a session."""
+    """Extract slug, model, timestamps, token usage, and rich metadata."""
     slug = None
     model = None
     first_ts = None
     last_ts = None
     total_input_tokens = 0
     total_output_tokens = 0
+    cache_creation_tokens = 0
+    cache_read_tokens = 0
+    active_duration_ms = 0
+    permission_mode = None
+    tool_errors = 0
+    tool_successes = 0
+    thinking_level = None
+    models_used: set = set()
 
     for _lineno, obj in iter_jsonl(jsonl_path):
         if obj is None:
@@ -115,15 +116,45 @@ def extract_session_metadata(jsonl_path: Path) -> Dict[str, Any]:
                 first_ts = ts
             last_ts = ts
 
-        # Model and usage from assistant messages
+        obj_type = obj.get("type")
+
+        # Active duration from turn_duration system entries
+        if obj_type == "system" and obj.get("subtype") == "turn_duration":
+            active_duration_ms += obj.get("durationMs", 0)
+
+        # Permission mode from user entries (keep last seen)
+        if obj.get("permissionMode"):
+            permission_mode = obj["permissionMode"]
+
+        # Thinking level from user entries (keep last seen)
+        thinking_meta = obj.get("thinkingMetadata")
+        if thinking_meta and "level" in thinking_meta:
+            thinking_level = thinking_meta["level"]
+
+        # Model, usage, and cache tokens from assistant messages
         msg = obj.get("message") or {}
-        if msg.get("model") and not model:
-            model = msg["model"]
+
+        if msg.get("model"):
+            models_used.add(msg["model"])
+            if not model:
+                model = msg["model"]
 
         usage = msg.get("usage")
         if usage:
             total_input_tokens += usage.get("input_tokens", 0)
             total_output_tokens += usage.get("output_tokens", 0)
+            cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
+            cache_read_tokens += usage.get("cache_read_input_tokens", 0)
+
+        # Tool errors and successes from tool_result content blocks
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    if block.get("is_error"):
+                        tool_errors += 1
+                    else:
+                        tool_successes += 1
 
     return {
         "slug": slug,
@@ -132,7 +163,26 @@ def extract_session_metadata(jsonl_path: Path) -> Dict[str, Any]:
         "last_ts": last_ts,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "active_duration_ms": active_duration_ms,
+        "permission_mode": permission_mode,
+        "tool_errors": tool_errors,
+        "tool_successes": tool_successes,
+        "thinking_level": thinking_level,
+        "models_used": sorted(models_used),
     }
+
+
+def extract_active_duration(jsonl_path: Path) -> int:
+    """Extract total active duration (ms) from turn_duration entries."""
+    total = 0
+    for _lineno, obj in iter_jsonl(jsonl_path):
+        if obj is None:
+            continue
+        if obj.get("type") == "system" and obj.get("subtype") == "turn_duration":
+            total += obj.get("durationMs", 0)
+    return total
 
 
 def find_subagent_files(jsonl_path: Path) -> List[Path]:
@@ -259,6 +309,42 @@ def build_tool_calls_list(
     return calls
 
 
+def _estimate_cost(
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    model: Optional[str],
+) -> float:
+    """Estimate cost in USD based on token counts and model pricing.
+
+    Rates per million tokens (approximate):
+      opus:   $15 input, $75 output
+      sonnet: $3 input, $15 output
+      haiku:  $0.80 input, $4 output
+    Cache reads charged at 10% of input price.
+    """
+    if not model:
+        model = ""
+    m = model.lower()
+    if "opus" in m:
+        input_rate, output_rate = 15.0, 75.0
+    elif "haiku" in m:
+        input_rate, output_rate = 0.80, 4.0
+    else:
+        # Default to sonnet pricing
+        input_rate, output_rate = 3.0, 15.0
+
+    cache_read_rate = input_rate * 0.10
+
+    cost = (
+        input_tokens * input_rate
+        + output_tokens * output_rate
+        + cache_read_tokens * cache_read_rate
+    ) / 1_000_000
+
+    return round(cost, 4)
+
+
 def build_session_data(
     jsonl_path: Path,
     project: str,
@@ -331,6 +417,18 @@ def build_session_data(
         if sa_data:
             subagents.append(sa_data)
 
+    # Calculate total active duration (parent + subagents)
+    subagent_active_ms = sum(sa.get("active_duration_ms", 0) for sa in subagents)
+    total_active_duration_ms = meta["active_duration_ms"] + subagent_active_ms
+
+    # Cost estimate
+    cost_estimate = _estimate_cost(
+        meta["total_input_tokens"],
+        meta["total_output_tokens"],
+        meta["cache_read_tokens"],
+        meta["model"],
+    )
+
     return {
         "session_id": session_id,
         "slug": meta["slug"],
@@ -350,7 +448,17 @@ def build_session_data(
         "tokens": {
             "input": meta["total_input_tokens"],
             "output": meta["total_output_tokens"],
+            "cache_creation": meta["cache_creation_tokens"],
+            "cache_read": meta["cache_read_tokens"],
         },
+        "active_duration_ms": meta["active_duration_ms"],
+        "total_active_duration_ms": total_active_duration_ms,
+        "permission_mode": meta["permission_mode"],
+        "tool_errors": meta["tool_errors"],
+        "tool_successes": meta["tool_successes"],
+        "thinking_level": meta["thinking_level"],
+        "models_used": meta["models_used"],
+        "cost_estimate": cost_estimate,
         "subagents": subagents,
     }
 
@@ -382,6 +490,9 @@ def build_subagent_data(
 
     tool_counter = Counter(inv.tool_name for inv in invocations)
 
+    # Active duration from subagent's own turn_duration entries
+    active_duration_ms = extract_active_duration(sa_path)
+
     return {
         "agent_id": agent_id,
         "subagent_type": subagent_type,
@@ -390,6 +501,7 @@ def build_subagent_data(
         "tool_count": len(invocations),
         "tool_counts": dict(tool_counter.most_common()),
         "tool_calls": build_tool_calls_list(invocations, is_subagent=True),
+        "active_duration_ms": active_duration_ms,
     }
 
 
@@ -412,136 +524,3 @@ def make_project_readable(raw: str) -> str:
         return "TP"
 
     return name or raw
-
-
-def generate_dashboard(
-    root: Path,
-    template_path: Path,
-    output_path: Path,
-    verbose: bool = False,
-):
-    """Main entry: scan JSONL files, build data, generate HTML."""
-    print("=" * 60)
-    print("CLAUDE CODE ACTIVITY DASHBOARD GENERATOR")
-    print("=" * 60)
-    print(f"Scanning: {root}")
-    print()
-
-    adapters = create_adapter_registry()
-    options = ExtractionOptions(
-        include_content_previews=True,
-        preview_length=150,
-        verbose=verbose,
-    )
-
-    # Find only top-level session JSONL files (not subagent files)
-    all_jsonl = find_jsonl_files(root)
-    # Filter out subagent files (they live under */subagents/)
-    session_files = [
-        p for p in all_jsonl
-        if "subagents" not in p.parts
-    ]
-
-    print(f"Found {len(session_files)} session files "
-          f"({len(all_jsonl) - len(session_files)} subagent files)")
-
-    sessions = []
-    projects_seen = set()
-
-    for i, jsonl_path in enumerate(session_files):
-        project_raw = derive_project_name(jsonl_path, root)
-        project = make_project_readable(project_raw)
-        projects_seen.add(project)
-
-        if verbose:
-            print(f"  [{i+1}/{len(session_files)}] {project}/{jsonl_path.name}")
-
-        try:
-            session = build_session_data(jsonl_path, project, adapters, options)
-            if session:
-                sessions.append(session)
-        except Exception as e:
-            print(f"  Warning: Failed to process {jsonl_path.name}: {e}",
-                  file=sys.stderr)
-
-    # Sort sessions by start_time descending (newest first)
-    sessions.sort(key=lambda s: s.get("start_time") or "", reverse=True)
-
-    print(f"\nProcessed {len(sessions)} sessions across {len(projects_seen)} projects")
-
-    # Build the dashboard data payload
-    dashboard_data = {
-        "generated_at": datetime.now().isoformat(),
-        "projects": sorted(projects_seen),
-        "sessions": sessions,
-    }
-
-    # Read template and inject data
-    if not template_path.exists():
-        print(f"Error: Template not found: {template_path}", file=sys.stderr)
-        sys.exit(1)
-
-    template_html = template_path.read_text(encoding="utf-8")
-
-    # Inject data as JSON - replace the placeholder in the template
-    data_json = json.dumps(dashboard_data, ensure_ascii=False)
-    output_html = template_html.replace(
-        "const DASHBOARD_DATA = {};",
-        f"const DASHBOARD_DATA = {data_json};",
-    )
-
-    output_path.write_text(output_html, encoding="utf-8")
-
-    size_mb = output_path.stat().st_size / (1024 * 1024)
-    print(f"\nDashboard written to: {output_path}")
-    print(f"  Size: {size_mb:.1f} MB")
-    print(f"  Sessions: {len(sessions)}")
-    print(f"  Projects: {len(projects_seen)}")
-
-    total_tools = sum(s["total_tools"] for s in sessions)
-    total_subagents = sum(len(s["subagents"]) for s in sessions)
-    print(f"  Total tool calls: {total_tools:,}")
-    print(f"  Total subagents: {total_subagents}")
-    print(f"\nOpen in a browser: file://{output_path.resolve()}")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate a self-contained HTML dashboard of Claude Code activity"
-    )
-    parser.add_argument(
-        "-o", "--output",
-        type=Path,
-        default=Path("dashboard.html"),
-        help="Output HTML file path (default: dashboard.html)",
-    )
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=Path.home() / ".claude/projects",
-        help="Root directory to scan for JSONL files",
-    )
-    parser.add_argument(
-        "--template",
-        type=Path,
-        default=Path(__file__).parent / "dashboard_template.html",
-        help="Path to HTML template file",
-    )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Verbose output",
-    )
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    if not args.root.exists():
-        print(f"Error: Root directory does not exist: {args.root}", file=sys.stderr)
-        sys.exit(1)
-    generate_dashboard(args.root, args.template, args.output, args.verbose)
-
-
-if __name__ == "__main__":
-    main()

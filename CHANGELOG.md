@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-14: Session Parser Library and Dashboard Metadata Enhancement
+- **Added**: `session_parser.py` - Extracted session parsing logic from dashboard generation into a reusable library module. Removes static generation code; now provides pure session data extraction with rich metadata.
+- **Added**: Rich metadata extraction including active duration (from turn_duration system entries), cache tokens (creation and read from usage data), permission mode, tool success/error counts, thinking level, unique models used, and cost estimation based on model pricing.
+- **Added**: Subagent active duration extraction to track actual working time for spawned agents.
+- **Changed**: `app.py` imports updated to use `session_parser` module. Added new fields to `/api/sessions` endpoint: active_duration_ms, total_active_duration_ms, cost_estimate, permission_mode.
+- **Changed**: `dashboard_template.html` enhanced with formatting helpers and new UI cards showing total active time, token counts with cache hit percentage, estimated cost, and session-level metrics for thinking level, permission mode, and error counts.
+- **Changed**: Updated `CLAUDE.md` to document session_parser.py and removed references to generate_dashboard.py.
+- **Removed**: Static `dashboard.html` generated artifact (no longer checked in).
+- **Removed**: `generate_dashboard.py` - functionality migrated to session_parser.py library module.
+
 #### 2026-02-14: Interactive Dashboard for Session Analysis
 - **Added**: `generate_dashboard.py` - Python script that scans all Claude Code JSONL session logs and generates a self-contained HTML dashboard with 1.3MB file size. Extracts session metadata including prompts, tool calls, timestamps, models, token usage, and subagent activity.
 - **Added**: `dashboard_template.html` - Interactive HTML/CSS/JS dashboard with three tabs: Overview (summary cards, charts, timeline), Task Explorer (project/session filters, detailed breakdown), and Action Log (chronological tool calls with filtering and pagination).

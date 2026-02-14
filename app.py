@@ -1,8 +1,8 @@
 """
 FastAPI service for Claude Code Activity Dashboard.
 
-Serves the same dashboard as generate_dashboard.py but live via HTTP,
-with cached JSONL scanning (5-minute TTL) to avoid re-parsing on every request.
+Serves the live dashboard via HTTP with cached JSONL scanning
+(5-minute TTL) to avoid re-parsing on every request.
 
 Deployment: uvicorn app:app --host 127.0.0.1 --port 8202
 """
@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from extract_tool_usage import find_jsonl_files, derive_project_name
-from generate_dashboard import build_session_data, make_project_readable
+from session_parser import build_session_data, make_project_readable
 from tool_adapters import create_adapter_registry, ExtractionOptions
 
 # ---------------------------------------------------------------------------
@@ -167,6 +167,10 @@ def api_sessions(project: Optional[str] = Query(default=None)):
             "total_tools": s["total_tools"],
             "turn_count": s.get("turn_count", 0),
             "subagent_count": len(s.get("subagents", [])),
+            "active_duration_ms": s.get("active_duration_ms"),
+            "total_active_duration_ms": s.get("total_active_duration_ms"),
+            "cost_estimate": s.get("cost_estimate"),
+            "permission_mode": s.get("permission_mode"),
         }
         for s in sessions
     ]

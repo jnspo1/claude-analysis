@@ -205,7 +205,7 @@
 </div>
 
 <script>
-// Data injected by generate_dashboard.py
+// Data injected by app.py
 const DASHBOARD_DATA = {};
 
 // State
@@ -232,7 +232,7 @@ function getToolBadgeClass(name) {
 
 // ---- INIT ----
 document.addEventListener('DOMContentLoaded', () => {
-  if (!DASHBOARD_DATA.sessions) { document.querySelector('.content').innerHTML = '<div class="empty-state"><h3>No data</h3><p>Run generate_dashboard.py to populate this file.</p></div>'; return; }
+  if (!DASHBOARD_DATA.sessions) { document.querySelector('.content').innerHTML = '<div class="empty-state"><h3>No data</h3><p>No session data available.</p></div>'; return; }
 
   // Header
   const d = DASHBOARD_DATA;
@@ -264,10 +264,22 @@ function renderOverview() {
   const dateRange = dates.length ? `${fmtDate(dates[0])} - ${fmtDate(dates[dates.length-1])}` : 'N/A';
 
   const combinedTotal = totalTools + subagentTools;
+
+  // Aggregate active time, tokens, cost
+  const totalActiveMs = sessions.reduce((s, x) => s + (x.total_active_duration_ms || 0), 0);
+  const totalInputTokens = sessions.reduce((s, x) => s + (x.tokens ? x.tokens.input : 0), 0);
+  const totalOutputTokens = sessions.reduce((s, x) => s + (x.tokens ? x.tokens.output : 0), 0);
+  const totalCacheRead = sessions.reduce((s, x) => s + (x.tokens ? (x.tokens.cache_read || 0) : 0), 0);
+  const totalAllTokens = totalInputTokens + totalOutputTokens;
+  const cacheEfficiency = totalInputTokens > 0 ? Math.round(totalCacheRead / (totalInputTokens + totalCacheRead) * 100) : 0;
+  const totalCost = sessions.reduce((s, x) => s + (x.cost_estimate || 0), 0);
+
   document.getElementById('summaryCards').innerHTML = `
     <div class="card"><div class="label">Sessions</div><div class="value">${sessions.length}</div><div class="sub">${dateRange}</div></div>
+    <div class="card"><div class="label">Total Active Time</div><div class="value">${fmtDurationMs(totalActiveMs) || 'N/A'}</div><div class="sub">Claude working time across all sessions</div></div>
     <div class="card"><div class="label">Total Actions</div><div class="value">${combinedTotal.toLocaleString()}</div><div class="sub">${totalTools.toLocaleString()} direct + ${subagentTools.toLocaleString()} from ${totalSubagents} subagents</div></div>
-    <div class="card"><div class="label">Projects</div><div class="value">${DASHBOARD_DATA.projects.length}</div></div>
+    <div class="card"><div class="label">Total Tokens</div><div class="value">${fmtTokenCount(totalAllTokens)}</div><div class="sub">${fmtTokenCount(totalInputTokens)} in / ${fmtTokenCount(totalOutputTokens)} out${cacheEfficiency > 0 ? ' | ' + cacheEfficiency + '% cache hit' : ''}</div></div>
+    <div class="card"><div class="label">Estimated Cost</div><div class="value">~$${totalCost.toFixed(2)}</div><div class="sub">${DASHBOARD_DATA.projects.length} projects</div></div>
     <div class="card"><div class="label">Subagents Spawned</div><div class="value">${totalSubagents}</div></div>
   `;
 
@@ -403,14 +415,38 @@ function showSessionDetail(s) {
 
   // Meta
   const totalActions = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
-  const duration = (s.start_time && s.end_time) ? calcDuration(s.start_time, s.end_time) : null;
+  const wallClock = (s.start_time && s.end_time) ? calcDuration(s.start_time, s.end_time) : null;
+  const activeTime = fmtDurationMs(s.total_active_duration_ms);
   let metaHtml = `<span><strong>Project:</strong> ${esc(s.project)}</span>`;
   metaHtml += `<span><strong>Date:</strong> ${s.start_time ? fmtDateTime(s.start_time) : 'N/A'}</span>`;
   if (s.model) metaHtml += `<span><strong>Model:</strong> ${esc(s.model)}</span>`;
   metaHtml += `<span title="Number of user messages sent in this conversation"><strong>Turns:</strong> ${s.turn_count}</span>`;
-  if (duration) metaHtml += `<span><strong>Duration:</strong> ${duration}</span>`;
+  if (activeTime) {
+    metaHtml += `<span title="Active working time (wall clock: ${wallClock || 'N/A'})"><strong>Active:</strong> ${activeTime}${wallClock ? ' <span style="color:var(--text-dim);font-size:11px;">(wall: ' + wallClock + ')</span>' : ''}</span>`;
+  } else if (wallClock) {
+    metaHtml += `<span><strong>Duration:</strong> ${wallClock}</span>`;
+  }
+  // Tokens
+  if (s.tokens) {
+    const inp = s.tokens.input || 0;
+    const out = s.tokens.output || 0;
+    const cacheRead = s.tokens.cache_read || 0;
+    const cachePct = inp > 0 ? Math.round(cacheRead / (inp + cacheRead) * 100) : 0;
+    const tokenTip = cachePct > 0 ? `Cache hit: ${cachePct}%` : '';
+    metaHtml += `<span title="${tokenTip}"><strong>Tokens:</strong> ${fmtTokenCount(inp)} in / ${fmtTokenCount(out)} out${cachePct > 0 ? ' (' + cachePct + '% cached)' : ''}</span>`;
+  }
+  // Cost
+  if (s.cost_estimate) {
+    metaHtml += `<span class="badge" style="background:#1a3d2e;color:var(--green)">~$${s.cost_estimate.toFixed(2)}</span>`;
+  }
   metaHtml += `<span class="badge">${totalActions} actions</span>`;
   if (s.subagents.length) metaHtml += `<span class="badge" style="background:var(--accent2)">${s.subagents.length} subagent${s.subagents.length>1?'s':''}</span>`;
+  // Thinking level
+  if (s.thinking_level) metaHtml += `<span class="badge" style="background:#2e1a3d;color:var(--accent2)">thinking: ${esc(s.thinking_level)}</span>`;
+  // Permission mode
+  if (s.permission_mode) metaHtml += `<span class="badge" style="background:var(--surface2);color:var(--text-dim)">${esc(s.permission_mode)}</span>`;
+  // Tool errors
+  if (s.tool_errors > 0) metaHtml += `<span class="badge" style="background:#3d1a1a;color:var(--red)">${s.tool_errors} error${s.tool_errors>1?'s':''}</span>`;
   document.getElementById('sessionMeta').innerHTML = metaHtml;
 
   // Tool donut chart (combined: parent + subagent tools)
@@ -489,9 +525,10 @@ function showSessionDetail(s) {
       const taskDesc = sa.task_description || '';
       const typeLabel = agentType !== 'agent' ? `<span class="agent-type-badge">${esc(agentType)}</span> ` : '';
       const headerLabel = taskDesc ? taskDesc : (agentType !== 'agent' ? agentType : `Agent ${sa.agent_id}`);
+      const saActive = fmtDurationMs(sa.active_duration_ms);
       html += `<div class="subagent-card">
         <div class="subagent-header" onclick="toggleSubagent(${idx})">
-          <div>${typeLabel}<span class="agent-label">${esc(headerLabel)}</span> <span class="agent-meta">${sa.tool_count} actions</span></div>
+          <div>${typeLabel}<span class="agent-label">${esc(headerLabel)}</span> <span class="agent-meta">${sa.tool_count} actions${saActive ? ' | ' + saActive : ''}</span></div>
           <span class="arrow" id="saArrow${idx}">&#9654;</span>
         </div>
         <div class="subagent-body" id="saBody${idx}">
@@ -602,6 +639,21 @@ function logPageNav(delta) {
 }
 
 // ---- HELPERS ----
+function fmtDurationMs(ms) {
+  if (!ms || ms <= 0) return null;
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ${secs % 60}s`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ${mins % 60}m`;
+}
+function fmtTokenCount(n) {
+  if (!n) return '0';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
 function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function fmtDate(ts) { if (!ts) return ''; try { const d = new Date(ts); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch(e) { return ts.slice(0,10); } }
 function fmtDateTime(ts) { if (!ts) return ''; try { const d = new Date(ts); return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch(e) { return ts; } }
