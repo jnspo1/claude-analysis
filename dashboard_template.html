@@ -98,10 +98,11 @@
   .subagent-header { padding: 12px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   .subagent-header:hover { background: rgba(108, 140, 255, 0.05); }
   .subagent-header .agent-label { font-size: 13px; font-weight: 600; color: var(--accent2); }
+  .agent-type-badge { display: inline-block; background: var(--accent2); color: #fff; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-right: 6px; vertical-align: middle; }
   .subagent-header .agent-meta { font-size: 12px; color: var(--text-dim); }
   .subagent-body { padding: 0 16px 16px; display: none; }
   .subagent-body.open { display: block; }
-  .subagent-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.4; }
+  .subagent-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.5; background: var(--surface); padding: 8px 10px; border-radius: 4px; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
   .arrow { transition: transform 0.2s; display: inline-block; }
   .arrow.open { transform: rotate(90deg); }
 
@@ -262,9 +263,10 @@ function renderOverview() {
   const dates = sessions.map(s => s.start_time).filter(Boolean).sort();
   const dateRange = dates.length ? `${fmtDate(dates[0])} - ${fmtDate(dates[dates.length-1])}` : 'N/A';
 
+  const combinedTotal = totalTools + subagentTools;
   document.getElementById('summaryCards').innerHTML = `
     <div class="card"><div class="label">Sessions</div><div class="value">${sessions.length}</div><div class="sub">${dateRange}</div></div>
-    <div class="card"><div class="label">Total Actions</div><div class="value">${totalTools.toLocaleString()}</div><div class="sub">+${subagentTools.toLocaleString()} from subagents</div></div>
+    <div class="card"><div class="label">Total Actions</div><div class="value">${combinedTotal.toLocaleString()}</div><div class="sub">${totalTools.toLocaleString()} direct + ${subagentTools.toLocaleString()} from ${totalSubagents} subagents</div></div>
     <div class="card"><div class="label">Projects</div><div class="value">${DASHBOARD_DATA.projects.length}</div></div>
     <div class="card"><div class="label">Subagents Spawned</div><div class="value">${totalSubagents}</div></div>
   `;
@@ -405,15 +407,21 @@ function showSessionDetail(s) {
   let metaHtml = `<span><strong>Project:</strong> ${esc(s.project)}</span>`;
   metaHtml += `<span><strong>Date:</strong> ${s.start_time ? fmtDateTime(s.start_time) : 'N/A'}</span>`;
   if (s.model) metaHtml += `<span><strong>Model:</strong> ${esc(s.model)}</span>`;
-  metaHtml += `<span><strong>Turns:</strong> ${s.turn_count}</span>`;
+  metaHtml += `<span title="Number of user messages sent in this conversation"><strong>Turns:</strong> ${s.turn_count}</span>`;
   if (duration) metaHtml += `<span><strong>Duration:</strong> ${duration}</span>`;
   metaHtml += `<span class="badge">${totalActions} actions</span>`;
   if (s.subagents.length) metaHtml += `<span class="badge" style="background:var(--accent2)">${s.subagents.length} subagent${s.subagents.length>1?'s':''}</span>`;
   document.getElementById('sessionMeta').innerHTML = metaHtml;
 
-  // Tool donut chart
+  // Tool donut chart (combined: parent + subagent tools)
   if (sessionToolChart) sessionToolChart.destroy();
-  const tc = Object.entries(s.tool_counts).sort((a,b) => b[1]-a[1]);
+  const combinedToolCounts = { ...s.tool_counts };
+  s.subagents.forEach(sa => {
+    Object.entries(sa.tool_counts).forEach(([t, c]) => {
+      combinedToolCounts[t] = (combinedToolCounts[t] || 0) + c;
+    });
+  });
+  const tc = Object.entries(combinedToolCounts).sort((a,b) => b[1]-a[1]);
   sessionToolChart = new Chart(document.getElementById('sessionToolChart'), {
     type: 'doughnut',
     data: {
@@ -474,16 +482,20 @@ function showSessionDetail(s) {
   // Subagents
   const saDiv = document.getElementById('subagentsSection');
   if (s.subagents.length) {
-    let html = '<div class="table-box"><h3>Subagents</h3>';
+    let html = '<div class="table-box"><h3>Subagents (' + s.subagents.length + ')</h3>';
     s.subagents.forEach((sa, idx) => {
       const toolSummary = Object.entries(sa.tool_counts).map(([t,c]) => `${t}: ${c}`).join(', ');
+      const agentType = sa.subagent_type || 'agent';
+      const taskDesc = sa.task_description || '';
+      const typeLabel = agentType !== 'agent' ? `<span class="agent-type-badge">${esc(agentType)}</span> ` : '';
+      const headerLabel = taskDesc ? taskDesc : (agentType !== 'agent' ? agentType : `Agent ${sa.agent_id}`);
       html += `<div class="subagent-card">
         <div class="subagent-header" onclick="toggleSubagent(${idx})">
-          <div><span class="agent-label">Agent ${esc(sa.agent_id)}</span> <span class="agent-meta">${sa.tool_count} actions</span></div>
+          <div>${typeLabel}<span class="agent-label">${esc(headerLabel)}</span> <span class="agent-meta">${sa.tool_count} actions</span></div>
           <span class="arrow" id="saArrow${idx}">&#9654;</span>
         </div>
         <div class="subagent-body" id="saBody${idx}">
-          ${sa.description ? `<div class="subagent-desc">${esc(sa.description)}</div>` : ''}
+          ${sa.description ? `<div class="subagent-desc"><strong>Task prompt:</strong> ${esc(sa.description)}</div>` : ''}
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">${esc(toolSummary)}</div>
           <table><thead><tr><th>#</th><th>Tool</th><th>Detail</th></tr></thead><tbody>`;
       sa.tool_calls.slice(0, 30).forEach(tc => {

@@ -148,6 +148,58 @@ def find_subagent_files(jsonl_path: Path) -> List[Path]:
     return sorted(subagents_dir.glob("*.jsonl"))
 
 
+def extract_subagent_info(jsonl_path: Path) -> Dict[str, Dict[str, str]]:
+    """Extract subagent type and description from parent session's Task tool calls.
+
+    Scans the parent JSONL for:
+    1. Task tool_use blocks -> tool_use_id to {subagent_type, description}
+    2. Progress records -> parentToolUseID to agentId
+
+    Returns:
+        {agent_id: {"subagent_type": str, "description": str}}
+    """
+    # Map tool_use_id -> {subagent_type, description} from Task invocations
+    task_calls: Dict[str, Dict[str, str]] = {}
+    # Map parentToolUseID -> agentId from progress records
+    agent_mapping: Dict[str, str] = {}
+
+    for _lineno, obj in iter_jsonl(jsonl_path):
+        if obj is None:
+            continue
+
+        # Look for Task tool_use blocks in assistant messages
+        msg = obj.get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") == "Task"):
+                    tool_use_id = block.get("id", "")
+                    inp = block.get("input", {})
+                    task_calls[tool_use_id] = {
+                        "subagent_type": inp.get("subagent_type", ""),
+                        "description": inp.get("description", ""),
+                    }
+
+        # Look for progress records with agentId
+        if obj.get("type") == "progress":
+            data = obj.get("data", {})
+            agent_id = data.get("agentId")
+            parent_tool_use_id = obj.get("parentToolUseID")
+            if agent_id and parent_tool_use_id and parent_tool_use_id not in agent_mapping:
+                agent_mapping[parent_tool_use_id] = agent_id
+
+    # Combine: agent_id -> {subagent_type, description}
+    result: Dict[str, Dict[str, str]] = {}
+    for tool_use_id, info in task_calls.items():
+        agent_id = agent_mapping.get(tool_use_id)
+        if agent_id:
+            result[agent_id] = info
+
+    return result
+
+
 def _get_tool_detail(inv: ToolInvocation) -> str:
     """Get a human-readable detail string for a tool invocation."""
     name = inv.tool_name
@@ -273,8 +325,9 @@ def build_session_data(
     # Process subagents
     subagents = []
     subagent_files = find_subagent_files(jsonl_path)
+    subagent_info = extract_subagent_info(jsonl_path) if subagent_files else {}
     for sa_path in subagent_files:
-        sa_data = build_subagent_data(sa_path, project, adapters, options)
+        sa_data = build_subagent_data(sa_path, project, adapters, options, subagent_info)
         if sa_data:
             subagents.append(sa_data)
 
@@ -307,6 +360,7 @@ def build_subagent_data(
     project: str,
     adapters: Dict,
     options: ExtractionOptions,
+    subagent_info: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Optional[Dict]:
     """Build data dict for a single subagent JSONL file."""
     invocations, _ = extract_tools_from_file(sa_path, project, adapters, options)
@@ -316,15 +370,22 @@ def build_subagent_data(
     # Agent ID from filename (agent-ad7c5cf.jsonl -> ad7c5cf)
     agent_id = sa_path.stem.replace("agent-", "")
 
-    # Try to find the agent's task description from first user message
+    # Get subagent type and task description from parent's Task tool call
+    info = (subagent_info or {}).get(agent_id, {})
+    subagent_type = info.get("subagent_type", "")
+    task_description = info.get("description", "")
+
+    # Fall back to extracting from the subagent's own first prompt
     description = extract_first_prompt(sa_path)
-    if description and len(description) > 120:
-        description = description[:120] + "..."
+    if description and len(description) > 200:
+        description = description[:200] + "..."
 
     tool_counter = Counter(inv.tool_name for inv in invocations)
 
     return {
         "agent_id": agent_id,
+        "subagent_type": subagent_type,
+        "task_description": task_description,
         "description": description,
         "tool_count": len(invocations),
         "tool_counts": dict(tool_counter.most_common()),
