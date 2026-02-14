@@ -122,6 +122,8 @@ def dashboard_html():
     data = _get_cached_data()
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     data_json = json.dumps(data, ensure_ascii=False)
+    # Escape </ sequences to prevent </script> in data from breaking HTML parser
+    data_json = data_json.replace("</", r"<\/")
     html = template.replace(
         "const DASHBOARD_DATA = {};",
         f"const DASHBOARD_DATA = {data_json};",

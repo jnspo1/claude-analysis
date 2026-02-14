@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - **Added**: Interactive bash category pills allowing users to filter the command table by category. Each pill shows the command count for that category.
 - **Added**: Category column in bash commands table and data attributes for row-level filtering.
 - **Added**: CSS styling for conversation flow (turn list with interrupt styling), interrupt badge, and category pills with hover/active states.
+- **Fixed**: HTML parser breaking when `</script>` tags appear in user turn text data. Added escaping of `</` sequences to `<\/` before injecting JSON into script block—prevents malformed HTML when turn content contains closing tags.
 
 #### 2026-02-14: Session Parser Library and Dashboard Metadata Enhancement
 - **Added**: `session_parser.py` - Extracted session parsing logic from dashboard generation into a reusable library module. Removes static generation code; now provides pure session data extraction with rich metadata.
