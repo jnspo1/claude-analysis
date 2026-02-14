@@ -26,8 +26,17 @@ from extract_tool_usage import (
 from tool_adapters import create_adapter_registry, ExtractionOptions, ToolInvocation
 
 
+def _is_interrupt_message(text: str) -> bool:
+    """Check if a message is a Claude Code tool-use interruption marker."""
+    stripped = text.strip()
+    return stripped in (
+        "[Request interrupted by user]",
+        "[Request interrupted by user for tool use]",
+    )
+
+
 def extract_first_prompt(jsonl_path: Path) -> Optional[str]:
-    """Find the first real user message (not a system/command message)."""
+    """Find the first real user message (not a system/command/interrupt message)."""
     for _lineno, obj in iter_jsonl(jsonl_path):
         if obj is None:
             continue
@@ -46,6 +55,9 @@ def extract_first_prompt(jsonl_path: Path) -> Optional[str]:
             continue
         if len(stripped) < 3:
             continue
+        # Skip interrupt markers
+        if _is_interrupt_message(stripped):
+            continue
 
         # Strip leading XML tags (system-reminder, etc.) to find actual user text
         cleaned = re.sub(r'^(<[^>]+>[\s\S]*?</[^>]+>\s*)+', '', stripped).strip()
@@ -55,6 +67,58 @@ def extract_first_prompt(jsonl_path: Path) -> Optional[str]:
             return stripped
 
     return None
+
+
+def extract_user_turns(jsonl_path: Path) -> List[Dict[str, Any]]:
+    """Extract all user messages with metadata for conversation flow display.
+
+    Returns list of dicts with: text, timestamp, is_interrupt, turn_number.
+    System/command messages are excluded.
+    """
+    turns: List[Dict[str, Any]] = []
+    turn_number = 0
+
+    for _lineno, obj in iter_jsonl(jsonl_path):
+        if obj is None:
+            continue
+        msg = obj.get("message") or {}
+        if msg.get("role") != "user":
+            continue
+
+        content = msg.get("content", "")
+        text = _extract_text_from_content(content)
+        if not text:
+            continue
+
+        stripped = text.strip()
+        # Skip system-generated messages and commands
+        if stripped.startswith("<local-command") or stripped.startswith("<command-"):
+            continue
+        if len(stripped) < 3:
+            continue
+
+        turn_number += 1
+        is_interrupt = _is_interrupt_message(stripped)
+
+        # Clean XML tags from non-interrupt messages for display
+        display_text = stripped
+        if not is_interrupt:
+            cleaned = re.sub(r'^(<[^>]+>[\s\S]*?</[^>]+>\s*)+', '', stripped).strip()
+            if cleaned and len(cleaned) > 3:
+                display_text = cleaned
+
+        # Truncate long messages for display
+        if len(display_text) > 300:
+            display_text = display_text[:300] + "..."
+
+        turns.append({
+            "text": display_text,
+            "timestamp": obj.get("timestamp"),
+            "is_interrupt": is_interrupt,
+            "turn_number": turn_number,
+        })
+
+    return turns
 
 
 def _extract_text_from_content(content) -> Optional[str]:
@@ -70,6 +134,47 @@ def _extract_text_from_content(content) -> Optional[str]:
                 parts.append(block.get("text", ""))
         return "\n".join(parts) if parts else None
     return None
+
+
+# -- Bash command categorization --
+BASH_CATEGORIES = {
+    "Git": re.compile(r'^(git|gh)\b'),
+    "Search": re.compile(r'^(grep|rg|find|fd|ag|ack)\b'),
+    "File Ops": re.compile(r'^(ls|cp|mv|rm|mkdir|rmdir|chmod|chown|ln|touch|stat|du|df|cat|head|tail|wc|sort|uniq|tee|tar|zip|unzip|gzip)\b'),
+    "Python": re.compile(r'^(python|python3|pip|pip3|pytest|mypy|ruff|black|isort|flake8|pylint|uvicorn)\b'),
+    "Node/NPM": re.compile(r'^(node|npm|npx|yarn|pnpm|bun|deno|tsx|tsc)\b'),
+    "Network": re.compile(r'^(curl|wget|ssh|scp|rsync|ping|nc|netstat|ss|nmap|dig|nslookup|traceroute)\b'),
+    "System": re.compile(r'^(sudo|systemctl|journalctl|service|kill|pkill|ps|top|htop|which|whereis|whoami|hostname|uname|date|env|export|source|echo|printf|sleep|docker|docker-compose)\b'),
+    "Editor": re.compile(r'^(sed|awk|vim|vi|nano|code|subl)\b'),
+}
+
+
+def categorize_bash_command(command: str) -> str:
+    """Categorize a bash command string into a high-level group."""
+    cmd = command.strip()
+    # Handle piped commands — categorize by the first command
+    base_cmd = cmd.split("|")[0].strip()
+    # Handle sudo prefix
+    if base_cmd.startswith("sudo "):
+        base_cmd = base_cmd[5:].strip()
+    # Handle env vars like FOO=bar command
+    while "=" in base_cmd.split()[0] if base_cmd.split() else False:
+        base_cmd = " ".join(base_cmd.split()[1:])
+
+    # Check if the piped chain contains grep/rg (search pattern)
+    if "|" in cmd:
+        pipe_parts = cmd.split("|")
+        for part in pipe_parts[1:]:
+            part_base = part.strip().split()[0] if part.strip().split() else ""
+            if part_base in ("grep", "rg", "awk", "sed"):
+                # If the first command is also search-like, categorize as Search
+                pass
+
+    for category, pattern in BASH_CATEGORIES.items():
+        if pattern.search(base_cmd):
+            return category
+
+    return "Other"
 
 
 def count_turns(jsonl_path: Path) -> int:
@@ -359,6 +464,8 @@ def build_session_data(
     meta = extract_session_metadata(jsonl_path)
     first_prompt = extract_first_prompt(jsonl_path)
     turn_count = count_turns(jsonl_path)
+    user_turns = extract_user_turns(jsonl_path)
+    interrupt_count = sum(1 for t in user_turns if t["is_interrupt"])
 
     # Skip sessions with no tools and no meaningful content
     if not invocations and not first_prompt:
@@ -392,13 +499,18 @@ def build_session_data(
             bash_bases[base] += 1
 
     bash_commands_list = []
+    bash_category_counter: Counter = Counter()
     for cmd, cnt in bash_cmds.most_common(50):
         base = cmd.split()[0] if cmd.split() else cmd
+        category = categorize_bash_command(cmd)
+        bash_category_counter[category] += cnt
         bash_commands_list.append({
             "command": cmd[:200],
             "base": base,
             "count": cnt,
+            "category": category,
         })
+    bash_category_summary = dict(bash_category_counter.most_common())
 
     # Tool calls chronological list
     tool_calls = build_tool_calls_list(invocations)
@@ -444,7 +556,10 @@ def build_session_data(
         "file_extensions": dict(file_extensions.most_common()),
         "files_touched": files_touched,
         "bash_commands": bash_commands_list,
+        "bash_category_summary": bash_category_summary,
         "tool_calls": tool_calls,
+        "user_turns": user_turns,
+        "interrupt_count": interrupt_count,
         "tokens": {
             "input": meta["total_input_tokens"],
             "output": meta["total_output_tokens"],

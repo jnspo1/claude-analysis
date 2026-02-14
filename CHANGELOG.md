@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-14: Conversation Flow and Bash Command Categorization
+- **Added**: `_is_interrupt_message()` function to detect Claude Code tool-use interruption markers in session_parser.py.
+- **Added**: `extract_user_turns()` function to extract all user messages with metadata (text, timestamp, is_interrupt flag, turn_number) for conversation flow visualization.
+- **Added**: `BASH_CATEGORIES` and `categorize_bash_command()` to classify bash commands into Git, Search, File Ops, Python, Node/NPM, Network, System, and Editor categories.
+- **Changed**: `extract_first_prompt()` now skips interrupt markers to find the actual first user prompt.
+- **Changed**: `build_session_data()` now extracts user turns, counts interrupts, and categorizes bash commands. Each bash command in the list now includes a `category` field.
+- **Changed**: `/api/sessions` lightweight endpoint in app.py now includes `interrupt_count` for each session.
+- **Added**: Dashboard now displays collapsible conversation flow with all user turns styled by type (regular vs interrupt), timestamps, and turn numbers.
+- **Added**: Interrupt badge in session metadata showing count of interrupted requests.
+- **Added**: Interactive bash category pills allowing users to filter the command table by category. Each pill shows the command count for that category.
+- **Added**: Category column in bash commands table and data attributes for row-level filtering.
+- **Added**: CSS styling for conversation flow (turn list with interrupt styling), interrupt badge, and category pills with hover/active states.
+
 #### 2026-02-14: Session Parser Library and Dashboard Metadata Enhancement
 - **Added**: `session_parser.py` - Extracted session parsing logic from dashboard generation into a reusable library module. Removes static generation code; now provides pure session data extraction with rich metadata.
 - **Added**: Rich metadata extraction including active duration (from turn_duration system entries), cache tokens (creation and read from usage data), permission mode, tool success/error counts, thinking level, unique models used, and cost estimation based on model pricing.
@@ -39,3 +52,5 @@ The claude_analysis project now provides comprehensive analysis of Claude Code t
 - Chronological action log with pagination
 - Subagent activity tracking and breakdown
 - Self-contained HTML dashboard for easy sharing and offline analysis
+- Conversation flow analysis with user turn tracking and interrupt detection
+- Bash command categorization with interactive filtering by command type

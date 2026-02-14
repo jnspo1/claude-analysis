@@ -119,6 +119,26 @@
   .filter-bar label:hover { color: var(--text); }
   .filter-bar input[type="checkbox"] { accent-color: var(--accent); }
 
+  /* Conversation flow */
+  .conversation-flow { margin-top: 12px; }
+  .conversation-flow summary { cursor: pointer; font-size: 13px; color: var(--text-dim); padding: 6px 0; user-select: none; }
+  .conversation-flow summary:hover { color: var(--text); }
+  .turn-list { list-style: none; padding: 8px 0 0 0; display: flex; flex-direction: column; gap: 6px; }
+  .turn-item { background: var(--surface2); border-left: 3px solid var(--accent); padding: 8px 12px; border-radius: 0 6px 6px 0; font-size: 13px; line-height: 1.4; }
+  .turn-item.interrupt { border-left-color: var(--orange); font-style: italic; color: var(--text-dim); background: rgba(251, 146, 60, 0.08); }
+  .turn-number { font-size: 11px; color: var(--text-dim); margin-right: 6px; font-weight: 600; }
+  .turn-time { font-size: 11px; color: var(--text-dim); float: right; }
+
+  /* Interrupt badge */
+  .badge-orange { background: rgba(251, 146, 60, 0.2); color: var(--orange); }
+
+  /* Bash category pills */
+  .category-pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .cat-pill { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--surface2); color: var(--text-dim); transition: all 0.15s; user-select: none; }
+  .cat-pill:hover { border-color: var(--accent); color: var(--text); }
+  .cat-pill.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .cat-pill .cat-count { opacity: 0.7; margin-left: 2px; }
+
   .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
   .empty-state h3 { margin-bottom: 8px; color: var(--text); }
 </style>
@@ -161,6 +181,7 @@
       <div class="session-summary">
         <h2 id="sessionTitle"></h2>
         <div class="prompt-text" id="promptText"></div>
+        <div class="conversation-flow" id="conversationFlow" style="display:none;"></div>
         <div class="meta-row" id="sessionMeta"></div>
       </div>
 
@@ -413,6 +434,24 @@ function showSessionDetail(s) {
   // Prompt
   document.getElementById('promptText').textContent = s.first_prompt || '(no prompt captured)';
 
+  // Conversation flow
+  const flowDiv = document.getElementById('conversationFlow');
+  const turns = s.user_turns || [];
+  // Show flow if there are multiple real turns (more than just the first prompt)
+  if (turns.length > 1) {
+    let flowHtml = `<details><summary>Conversation Flow (${turns.length} turns${s.interrupt_count ? ', ' + s.interrupt_count + ' interrupted' : ''})</summary><ul class="turn-list">`;
+    turns.forEach(t => {
+      const cls = t.is_interrupt ? ' interrupt' : '';
+      const timeStr = t.timestamp ? fmtTime(t.timestamp) : '';
+      flowHtml += `<li class="turn-item${cls}"><span class="turn-number">#${t.turn_number}</span>${timeStr ? '<span class="turn-time">' + timeStr + '</span>' : ''}${esc(t.text)}</li>`;
+    });
+    flowHtml += '</ul></details>';
+    flowDiv.innerHTML = flowHtml;
+    flowDiv.style.display = 'block';
+  } else {
+    flowDiv.style.display = 'none';
+  }
+
   // Meta
   const totalActions = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
   const wallClock = (s.start_time && s.end_time) ? calcDuration(s.start_time, s.end_time) : null;
@@ -447,6 +486,8 @@ function showSessionDetail(s) {
   if (s.permission_mode) metaHtml += `<span class="badge" style="background:var(--surface2);color:var(--text-dim)">${esc(s.permission_mode)}</span>`;
   // Tool errors
   if (s.tool_errors > 0) metaHtml += `<span class="badge" style="background:#3d1a1a;color:var(--red)">${s.tool_errors} error${s.tool_errors>1?'s':''}</span>`;
+  // Interrupts
+  if (s.interrupt_count > 0) metaHtml += `<span class="badge badge-orange">${s.interrupt_count} interrupt${s.interrupt_count>1?'s':''}</span>`;
   document.getElementById('sessionMeta').innerHTML = metaHtml;
 
   // Tool donut chart (combined: parent + subagent tools)
@@ -502,13 +543,28 @@ function showSessionDetail(s) {
     document.getElementById('fileOpsTable').innerHTML = '<p style="color:var(--text-dim);font-size:13px;">No file operations</p>';
   }
 
-  // Bash commands table
+  // Bash commands table with category pills
   if (s.bash_commands.length) {
-    let html = '<table><thead><tr><th>Command</th><th>Count</th></tr></thead><tbody>';
+    const catSummary = s.bash_category_summary || {};
+    const activeCats = new Set(Object.keys(catSummary));
+    window._bashActiveCats = activeCats;
+    window._bashCommands = s.bash_commands;
+
+    let html = '';
+    // Category pills
+    if (Object.keys(catSummary).length > 1) {
+      html += '<div class="category-pills" id="bashCatPills">';
+      html += `<span class="cat-pill active" data-cat="all" onclick="filterBashCat('all')">All<span class="cat-count">${s.bash_commands.reduce((a,c)=>a+c.count,0)}</span></span>`;
+      Object.entries(catSummary).forEach(([cat, cnt]) => {
+        html += `<span class="cat-pill" data-cat="${esc(cat)}" onclick="filterBashCat('${esc(cat)}')">${esc(cat)}<span class="cat-count"> ${cnt}</span></span>`;
+      });
+      html += '</div>';
+    }
+    html += '<table><thead><tr><th>Command</th><th>Category</th><th>Count</th></tr></thead><tbody id="bashTableBody">';
     s.bash_commands.slice(0, 25).forEach(c => {
-      html += `<tr><td class="mono">${esc(c.command)}</td><td>${c.count}</td></tr>`;
+      html += `<tr data-cat="${esc(c.category || 'Other')}"><td class="mono">${esc(c.command)}</td><td><span style="font-size:11px;color:var(--text-dim)">${esc(c.category || 'Other')}</span></td><td>${c.count}</td></tr>`;
     });
-    if (s.bash_commands.length > 25) html += `<tr><td colspan="2" style="color:var(--text-dim)">...and ${s.bash_commands.length - 25} more</td></tr>`;
+    if (s.bash_commands.length > 25) html += `<tr class="bash-overflow" data-cat="all"><td colspan="3" style="color:var(--text-dim)">...and ${s.bash_commands.length - 25} more</td></tr>`;
     html += '</tbody></table>';
     document.getElementById('bashTable').innerHTML = html;
   } else {
@@ -556,6 +612,21 @@ function toggleSubagent(idx) {
   const arrow = document.getElementById('saArrow' + idx);
   body.classList.toggle('open');
   arrow.classList.toggle('open');
+}
+
+function filterBashCat(cat) {
+  // Update pill active states
+  document.querySelectorAll('#bashCatPills .cat-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.cat === cat);
+  });
+  // Filter table rows
+  document.querySelectorAll('#bashTableBody tr').forEach(row => {
+    if (cat === 'all') {
+      row.style.display = '';
+    } else {
+      row.style.display = (row.dataset.cat === cat) ? '' : 'none';
+    }
+  });
 }
 
 // ---- ACTION LOG ----

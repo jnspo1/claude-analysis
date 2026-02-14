@@ -171,6 +171,7 @@ def api_sessions(project: Optional[str] = Query(default=None)):
             "total_active_duration_ms": s.get("total_active_duration_ms"),
             "cost_estimate": s.get("cost_estimate"),
             "permission_mode": s.get("permission_mode"),
+            "interrupt_count": s.get("interrupt_count", 0),
         }
         for s in sessions
     ]
