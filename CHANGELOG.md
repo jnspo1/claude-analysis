@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-16: PWA Home Screen Support
+- **Added**: iPhone home screen icon support with apple-touch-icon link and app title meta tags ("Task Monitor") to enable adding dashboard to iOS home screen. Includes /app_icon.jpg FileResponse endpoint and standalone mode meta tags for fullscreen display without Safari chrome.
+
 #### 2026-02-15: CLAUDE.md Quality Audit
 - **Added**: Dev server command, architecture section with data flow diagram, and cache behavior documentation to CLAUDE.md
 
