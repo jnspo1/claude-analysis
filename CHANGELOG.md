@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-15: CLAUDE.md Quality Audit
+- **Added**: Dev server command, architecture section with data flow diagram, and cache behavior documentation to CLAUDE.md
+
+
 #### 2026-02-14: Bash Category Refactoring and Command Classification Improvements
 - **Changed**: Replaced 8 technical bash categories (Git, Search, File Ops, Python, Node/NPM, Network, System, Editor) with 6 plain-language categories (Version Control, Running Code, Searching & Reading, File Management, Testing & Monitoring, Server & System) in session_parser.py for improved user understanding and task-oriented grouping.
 - **Changed**: Rewrote `categorize_bash_command()` to robustly handle edge cases: chained commands with `&&` and `;`, `cd` prefix skipping, full-path commands like `./venv/bin/python`, and venv activation patterns (both `source` and dot-space variants).
