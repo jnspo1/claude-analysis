@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from extract_tool_usage import find_jsonl_files, derive_project_name
 from session_parser import build_session_data, make_project_readable
@@ -111,6 +111,16 @@ def _get_cached_data(force_refresh: bool = False) -> Dict[str, Any]:
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/app_icon.jpg")
+async def app_icon():
+    """Serve the app icon for iPhone Home Screen"""
+    return FileResponse(
+        Path(__file__).parent / "static" / "app_icon.jpg",
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
