@@ -1,8 +1,9 @@
 """
 FastAPI service for Claude Code Activity Dashboard.
 
-Serves the live dashboard via HTTP with cached JSONL scanning
-(5-minute TTL) to avoid re-parsing on every request.
+Uses SQLite persistent cache with incremental rebuilds. Only new/changed
+JSONL files are reparsed. Global aggregates are pre-computed server-side
+so the HTML payload is ~50KB instead of 3MB.
 
 Deployment: uvicorn app:app --host 127.0.0.1 --port 8202
 """
@@ -10,18 +11,35 @@ Deployment: uvicorn app:app --host 127.0.0.1 --port 8202
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from extract_tool_usage import find_jsonl_files, derive_project_name
-from session_parser import build_session_data, make_project_readable
+from session_parser import make_project_readable
+from single_pass_parser import parse_session_single_pass
 from tool_adapters import create_adapter_registry, ExtractionOptions
+from cache_db import (
+    init_db,
+    get_connection,
+    get_stale_files,
+    upsert_session,
+    delete_removed_sessions,
+    rebuild_global_aggregates,
+    get_overview_payload,
+    get_session_list,
+    get_session_detail,
+    get_session_count,
+)
+
+logger = logging.getLogger("claude-activity")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -31,77 +49,124 @@ TEMPLATE_PATH = Path(__file__).parent / "dashboard_template.html"
 CACHE_TTL_SECONDS = 300  # 5 minutes
 
 # ---------------------------------------------------------------------------
-# App
+# Background rebuild state
 # ---------------------------------------------------------------------------
+_rebuild_lock = threading.Lock()
+_last_rebuild: float = 0.0
+_rebuild_in_progress = False
+_last_rebuild_stats: Dict[str, Any] = {}
+
+
+def _incremental_rebuild() -> Dict[str, Any]:
+    """Parse only new/changed JSONL files, update SQLite, recompute aggregates."""
+    global _last_rebuild, _rebuild_in_progress, _last_rebuild_stats
+
+    acquired = _rebuild_lock.acquire(blocking=False)
+    if not acquired:
+        return {"status": "skipped", "reason": "rebuild already in progress"}
+
+    try:
+        _rebuild_in_progress = True
+        t0 = time.monotonic()
+
+        adapters = create_adapter_registry()
+        options = ExtractionOptions(include_content_previews=True, preview_length=150)
+
+        # Find all session JSONL files (excluding subagent files)
+        all_jsonl = find_jsonl_files(JSONL_ROOT)
+        session_files = [p for p in all_jsonl if "subagents" not in p.parts]
+
+        conn = get_connection()
+        try:
+            stale_files, current_paths = get_stale_files(conn, session_files)
+
+            parsed = 0
+            errors = 0
+
+            for jsonl_path in stale_files:
+                project_raw = derive_project_name(jsonl_path, JSONL_ROOT)
+                project = make_project_readable(project_raw)
+
+                try:
+                    session = parse_session_single_pass(
+                        jsonl_path, project, adapters, options
+                    )
+                    if session:
+                        stat = jsonl_path.stat()
+                        upsert_session(
+                            conn,
+                            str(jsonl_path),
+                            session,
+                            stat.st_mtime,
+                            stat.st_size,
+                        )
+                        parsed += 1
+                except Exception as e:
+                    logger.warning("Failed to parse %s: %s", jsonl_path.name, e)
+                    errors += 1
+
+            # Remove sessions for deleted JSONL files
+            removed = delete_removed_sessions(conn, current_paths)
+
+            conn.commit()
+
+            # Recompute global aggregates
+            rebuild_global_aggregates(conn)
+
+        finally:
+            conn.close()
+
+        elapsed = time.monotonic() - t0
+        _last_rebuild = time.monotonic()
+
+        stats = {
+            "status": "completed",
+            "elapsed_seconds": round(elapsed, 2),
+            "total_files": len(session_files),
+            "stale_files": len(stale_files),
+            "parsed": parsed,
+            "errors": errors,
+            "removed": removed,
+            "total_cached": get_session_count(get_connection()),
+        }
+        _last_rebuild_stats = stats
+        logger.info(
+            "Rebuild done: %d parsed, %d errors, %d removed in %.1fs",
+            parsed, errors, removed, elapsed,
+        )
+        return stats
+
+    finally:
+        _rebuild_in_progress = False
+        _rebuild_lock.release()
+
+
+def _ensure_fresh() -> None:
+    """Trigger background rebuild if stale. Never blocks the caller."""
+    if (
+        (time.monotonic() - _last_rebuild) > CACHE_TTL_SECONDS
+        and not _rebuild_in_progress
+    ):
+        threading.Thread(target=_incremental_rebuild, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# App lifecycle
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize DB and trigger first rebuild on startup."""
+    init_db()
+    # Kick off initial rebuild in background so startup is instant
+    threading.Thread(target=_incremental_rebuild, daemon=True).start()
+    yield
+
+
 app = FastAPI(
     title="Claude Activity Dashboard",
     root_path="/claude_activity",
+    lifespan=lifespan,
 )
-
-# ---------------------------------------------------------------------------
-# Thread-safe cache
-# ---------------------------------------------------------------------------
-_cache_lock = threading.Lock()
-_cache: Dict[str, Any] = {
-    "data": None,
-    "built_at": 0.0,
-}
-
-
-def _build_dashboard_data() -> Dict[str, Any]:
-    """Scan JSONL files and build the full dashboard payload."""
-    adapters = create_adapter_registry()
-    options = ExtractionOptions(
-        include_content_previews=True,
-        preview_length=150,
-    )
-
-    all_jsonl = find_jsonl_files(JSONL_ROOT)
-    session_files = [p for p in all_jsonl if "subagents" not in p.parts]
-
-    sessions: List[Dict] = []
-    projects_seen: set[str] = set()
-
-    for jsonl_path in session_files:
-        project_raw = derive_project_name(jsonl_path, JSONL_ROOT)
-        project = make_project_readable(project_raw)
-        projects_seen.add(project)
-
-        try:
-            session = build_session_data(jsonl_path, project, adapters, options)
-            if session:
-                sessions.append(session)
-        except Exception:
-            continue
-
-    sessions.sort(key=lambda s: s.get("start_time") or "", reverse=True)
-
-    return {
-        "generated_at": datetime.now().isoformat(),
-        "projects": sorted(projects_seen),
-        "sessions": sessions,
-    }
-
-
-def _get_cached_data(force_refresh: bool = False) -> Dict[str, Any]:
-    """Return cached dashboard data, rebuilding if stale or forced."""
-    now = time.monotonic()
-    with _cache_lock:
-        if (
-            not force_refresh
-            and _cache["data"] is not None
-            and (now - _cache["built_at"]) < CACHE_TTL_SECONDS
-        ):
-            return _cache["data"]
-
-    # Build outside the lock (expensive, don't block other readers)
-    data = _build_dashboard_data()
-
-    with _cache_lock:
-        _cache["data"] = data
-        _cache["built_at"] = time.monotonic()
-
-    return data
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +175,16 @@ def _get_cached_data(force_refresh: bool = False) -> Dict[str, Any]:
 @app.get("/health")
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "cached_sessions": get_session_count(get_connection()),
+        "rebuild_in_progress": _rebuild_in_progress,
+    }
 
 
 @app.get("/app_icon.jpg")
 async def app_icon():
-    """Serve the app icon for iPhone Home Screen"""
+    """Serve the app icon for iPhone Home Screen."""
     return FileResponse(
         Path(__file__).parent / "static" / "app_icon.jpg",
         media_type="image/jpeg",
@@ -125,14 +194,28 @@ async def app_icon():
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard_html():
-    """Serve the full dashboard HTML with injected data."""
+    """Serve the dashboard HTML with lightweight data injection."""
     if not TEMPLATE_PATH.exists():
         raise HTTPException(status_code=500, detail="Template not found")
 
-    data = _get_cached_data()
+    _ensure_fresh()
+
+    conn = get_connection()
+    try:
+        overview = get_overview_payload(conn)
+        sessions = get_session_list(conn)
+    finally:
+        conn.close()
+
+    # Build lightweight init data (~50KB vs 3MB)
+    init_data = {
+        "overview": overview,
+        "sessions": sessions,
+        "rebuild_in_progress": _rebuild_in_progress,
+    }
+
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    data_json = json.dumps(data, ensure_ascii=False)
-    # Escape </ sequences to prevent </script> in data from breaking HTML parser
+    data_json = json.dumps(init_data, ensure_ascii=False, default=str)
     data_json = data_json.replace("</", r"<\/")
     html = template.replace(
         "const DASHBOARD_DATA = {};",
@@ -141,59 +224,74 @@ def dashboard_html():
     return HTMLResponse(content=html)
 
 
-@app.get("/api/data")
-def api_data():
-    """Return the full dashboard JSON payload."""
-    return _get_cached_data()
-
-
-@app.get("/api/refresh")
-def api_refresh():
-    """Force a cache rebuild and return fresh data."""
-    data = _get_cached_data(force_refresh=True)
-    return {
-        "status": "refreshed",
-        "generated_at": data["generated_at"],
-        "session_count": len(data["sessions"]),
-        "project_count": len(data["projects"]),
-    }
+@app.get("/api/overview")
+def api_overview():
+    """Return pre-computed overview aggregates."""
+    _ensure_fresh()
+    conn = get_connection()
+    try:
+        overview = get_overview_payload(conn)
+    finally:
+        conn.close()
+    if not overview:
+        return {"status": "building", "message": "Cache is being built"}
+    return overview
 
 
 @app.get("/api/sessions")
 def api_sessions(project: Optional[str] = Query(default=None)):
-    """Lightweight session summaries, optionally filtered by project."""
-    data = _get_cached_data()
-    sessions = data["sessions"]
-    if project:
-        sessions = [s for s in sessions if s["project"] == project]
-
-    return [
-        {
-            "session_id": s["session_id"],
-            "project": s["project"],
-            "slug": s.get("slug"),
-            "prompt_preview": s.get("prompt_preview"),
-            "start_time": s.get("start_time"),
-            "end_time": s.get("end_time"),
-            "model": s.get("model"),
-            "total_tools": s["total_tools"],
-            "turn_count": s.get("turn_count", 0),
-            "subagent_count": len(s.get("subagents", [])),
-            "active_duration_ms": s.get("active_duration_ms"),
-            "total_active_duration_ms": s.get("total_active_duration_ms"),
-            "cost_estimate": s.get("cost_estimate"),
-            "permission_mode": s.get("permission_mode"),
-            "interrupt_count": s.get("interrupt_count", 0),
-        }
-        for s in sessions
-    ]
+    """Lightweight session summaries from SQLite."""
+    _ensure_fresh()
+    conn = get_connection()
+    try:
+        return get_session_list(conn, project)
+    finally:
+        conn.close()
 
 
 @app.get("/api/session/{session_id}")
 def api_session_detail(session_id: str):
-    """Full detail for a single session."""
-    data = _get_cached_data()
-    for s in data["sessions"]:
-        if s["session_id"] == session_id:
-            return s
-    raise HTTPException(status_code=404, detail="Session not found")
+    """Full detail for a single session (lazy loaded on demand)."""
+    conn = get_connection()
+    try:
+        detail = get_session_detail(conn, session_id)
+    finally:
+        conn.close()
+    if not detail:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return detail
+
+
+@app.get("/api/data")
+def api_data():
+    """Backward-compatible full payload (deprecated, reconstructs from SQLite)."""
+    _ensure_fresh()
+    conn = get_connection()
+    try:
+        overview = get_overview_payload(conn)
+        sessions = get_session_list(conn)
+    finally:
+        conn.close()
+
+    return {
+        "generated_at": overview["generated_at"] if overview else datetime.now().isoformat(),
+        "projects": overview["projects_list"] if overview else [],
+        "sessions": sessions,
+    }
+
+
+@app.get("/api/refresh")
+def api_refresh():
+    """Force a cache rebuild and return status."""
+    stats = _incremental_rebuild()
+    return stats
+
+
+@app.get("/api/rebuild-status")
+def api_rebuild_status():
+    """Check if a rebuild is in progress."""
+    return {
+        "in_progress": _rebuild_in_progress,
+        "last_rebuild_stats": _last_rebuild_stats,
+        "seconds_since_rebuild": round(time.monotonic() - _last_rebuild, 1) if _last_rebuild else None,
+    }

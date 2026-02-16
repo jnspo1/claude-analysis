@@ -153,6 +153,16 @@
 
   .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
   .empty-state h3 { margin-bottom: 8px; color: var(--text); }
+
+  /* Loading spinner */
+  .loading-spinner { text-align: center; padding: 40px; color: var(--text-dim); }
+  .loading-spinner::before { content: ''; display: inline-block; width: 24px; height: 24px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-spinner p { margin-top: 8px; font-size: 13px; }
+
+  /* Rebuild banner */
+  .rebuild-banner { background: var(--surface2); border: 1px solid var(--accent); border-radius: 8px; padding: 12px 20px; margin-bottom: 16px; font-size: 13px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+  .rebuild-banner::before { content: ''; display: inline-block; width: 12px; height: 12px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
 </style>
 </head>
 <body>
@@ -171,6 +181,7 @@
 <div class="content">
   <!-- OVERVIEW TAB -->
   <div id="overview" class="tab-panel active">
+    <div id="rebuildBanner" style="display:none;" class="rebuild-banner">Cache is being built in the background. Data will appear shortly.</div>
     <div class="cards" id="summaryCards"></div>
     <div class="charts-grid">
       <div class="chart-box"><h3>Tool Distribution</h3><canvas id="toolPieChart"></canvas></div>
@@ -187,6 +198,10 @@
     <div class="explorer-controls">
       <select id="projectFilter"><option value="">All Projects</option></select>
       <select id="sessionSelect"><option value="">Select a session...</option></select>
+    </div>
+
+    <div id="sessionLoading" class="loading-spinner" style="display:none;">
+      <p>Loading session detail...</p>
     </div>
 
     <div id="sessionDetail" style="display:none;">
@@ -238,8 +253,11 @@
 </div>
 
 <script>
-// Data injected by app.py
+// Data injected by app.py — new shape: { overview, sessions (summaries), rebuild_in_progress }
 const DASHBOARD_DATA = {};
+
+// Resolve root path for API calls
+const rootPath = document.querySelector('link[rel="apple-touch-icon"]')?.href?.match(/(.*)\/app_icon/)?.[1] || '/claude_activity';
 
 // State
 let currentSession = null;
@@ -260,7 +278,7 @@ const TOOL_COLORS = {
 };
 function getToolColor(name) { return TOOL_COLORS[name] || '#8b8fa3'; }
 
-// Bash category colors and descriptions (plain-language categories)
+// Bash category colors and descriptions
 const BASH_CAT_COLORS = {
   'Version Control': '#6c8cff',
   'Running Code': '#4ade80',
@@ -284,13 +302,33 @@ function getToolBadgeClass(name) {
   return known.includes(name) ? name : 'default';
 }
 
+// ---- Safe DOM helpers ----
+// All dynamic content uses esc() for HTML escaping. This dashboard is
+// served on a Tailscale-only network with no external user input.
+function setHtml(el, html) { el.innerHTML = html; }
+function setHtmlById(id, html) { document.getElementById(id).innerHTML = html; }
+
 // ---- INIT ----
 document.addEventListener('DOMContentLoaded', () => {
-  if (!DASHBOARD_DATA.sessions) { document.querySelector('.content').innerHTML = '<div class="empty-state"><h3>No data</h3><p>No session data available.</p></div>'; return; }
+  const d = DASHBOARD_DATA;
+
+  // Show rebuild banner if building
+  if (d.rebuild_in_progress) {
+    document.getElementById('rebuildBanner').style.display = 'flex';
+  }
+
+  // Handle empty/building state
+  if (!d.overview && (!d.sessions || !d.sessions.length)) {
+    setHtmlById('summaryCards', '<div class="card" style="grid-column:1/-1;text-align:center;"><div class="label">Building Cache</div><div class="value" style="font-size:18px;">Parsing session files...</div><div class="sub">Refresh in a few seconds to see data.</div></div>');
+    return;
+  }
 
   // Header
-  const d = DASHBOARD_DATA;
-  document.getElementById('headerMeta').textContent = `Generated ${new Date(d.generated_at).toLocaleString()} | ${d.sessions.length} sessions | ${d.projects.length} projects`;
+  const ov = d.overview || {};
+  const sessCount = ov.total_sessions || (d.sessions ? d.sessions.length : 0);
+  const projCount = ov.project_count || 0;
+  const genAt = ov.generated_at ? new Date(ov.generated_at).toLocaleString() : 'N/A';
+  document.getElementById('headerMeta').textContent = `Generated ${genAt} | ${sessCount} sessions | ${projCount} projects`;
 
   // Tabs
   document.querySelectorAll('.tab').forEach(tab => {
@@ -306,121 +344,103 @@ document.addEventListener('DOMContentLoaded', () => {
   setupExplorer();
 });
 
-// ---- OVERVIEW ----
+// ---- OVERVIEW (reads pre-computed aggregates) ----
 function renderOverview() {
-  const sessions = DASHBOARD_DATA.sessions;
-  const totalTools = sessions.reduce((s, x) => s + x.total_tools, 0);
-  const totalSubagents = sessions.reduce((s, x) => s + x.subagents.length, 0);
-  const subagentTools = sessions.reduce((s, x) => s + x.subagents.reduce((a, b) => a + b.tool_count, 0), 0);
+  const ov = DASHBOARD_DATA.overview;
+  if (!ov) return;
 
-  // Date range
-  const dates = sessions.map(s => s.start_time).filter(Boolean).sort();
-  const dateRange = dates.length ? `${fmtDate(dates[0])} - ${fmtDate(dates[dates.length-1])}` : 'N/A';
+  const totalAllTokens = (ov.total_input_tokens || 0) + (ov.total_output_tokens || 0);
+  const cacheEfficiency = ov.total_input_tokens > 0 ? Math.round((ov.total_cache_read_tokens || 0) / (ov.total_input_tokens + (ov.total_cache_read_tokens || 0)) * 100) : 0;
+  const dateRange = (ov.date_range_start && ov.date_range_end) ? `${fmtDate(ov.date_range_start)} - ${fmtDate(ov.date_range_end)}` : 'N/A';
 
-  const combinedTotal = totalTools + subagentTools;
+  setHtmlById('summaryCards', `
+    <div class="card"><div class="label">Sessions</div><div class="value">${ov.total_sessions}</div><div class="sub">${dateRange}</div></div>
+    <div class="card"><div class="label">Total Active Time</div><div class="value">${fmtDurationMs(ov.total_active_ms) || 'N/A'}</div><div class="sub">Claude working time across all sessions</div></div>
+    <div class="card"><div class="label">Total Actions</div><div class="value">${ov.total_actions.toLocaleString()}</div><div class="sub">${ov.total_tools.toLocaleString()} direct + ${(ov.subagent_tools || 0).toLocaleString()} from ${ov.subagent_count || 0} subagents</div></div>
+    <div class="card"><div class="label">Total Tokens</div><div class="value">${fmtTokenCount(totalAllTokens)}</div><div class="sub">${fmtTokenCount(ov.total_input_tokens)} in / ${fmtTokenCount(ov.total_output_tokens)} out${cacheEfficiency > 0 ? ' | ' + cacheEfficiency + '% cache hit' : ''}</div></div>
+    <div class="card"><div class="label">Estimated Cost</div><div class="value">~$${(ov.total_cost || 0).toFixed(2)}</div><div class="sub">${ov.project_count} projects</div></div>
+    <div class="card"><div class="label">Subagents Spawned</div><div class="value">${ov.subagent_count || 0}</div></div>
+  `);
 
-  // Aggregate active time, tokens, cost
-  const totalActiveMs = sessions.reduce((s, x) => s + (x.total_active_duration_ms || 0), 0);
-  const totalInputTokens = sessions.reduce((s, x) => s + (x.tokens ? x.tokens.input : 0), 0);
-  const totalOutputTokens = sessions.reduce((s, x) => s + (x.tokens ? x.tokens.output : 0), 0);
-  const totalCacheRead = sessions.reduce((s, x) => s + (x.tokens ? (x.tokens.cache_read || 0) : 0), 0);
-  const totalAllTokens = totalInputTokens + totalOutputTokens;
-  const cacheEfficiency = totalInputTokens > 0 ? Math.round(totalCacheRead / (totalInputTokens + totalCacheRead) * 100) : 0;
-  const totalCost = sessions.reduce((s, x) => s + (x.cost_estimate || 0), 0);
-
-  document.getElementById('summaryCards').innerHTML = `
-    <div class="card"><div class="label">Sessions</div><div class="value">${sessions.length}</div><div class="sub">${dateRange}</div></div>
-    <div class="card"><div class="label">Total Active Time</div><div class="value">${fmtDurationMs(totalActiveMs) || 'N/A'}</div><div class="sub">Claude working time across all sessions</div></div>
-    <div class="card"><div class="label">Total Actions</div><div class="value">${combinedTotal.toLocaleString()}</div><div class="sub">${totalTools.toLocaleString()} direct + ${subagentTools.toLocaleString()} from ${totalSubagents} subagents</div></div>
-    <div class="card"><div class="label">Total Tokens</div><div class="value">${fmtTokenCount(totalAllTokens)}</div><div class="sub">${fmtTokenCount(totalInputTokens)} in / ${fmtTokenCount(totalOutputTokens)} out${cacheEfficiency > 0 ? ' | ' + cacheEfficiency + '% cache hit' : ''}</div></div>
-    <div class="card"><div class="label">Estimated Cost</div><div class="value">~$${totalCost.toFixed(2)}</div><div class="sub">${DASHBOARD_DATA.projects.length} projects</div></div>
-    <div class="card"><div class="label">Subagents Spawned</div><div class="value">${totalSubagents}</div></div>
-  `;
-
-  // Tool distribution pie
-  const allToolCounts = {};
-  sessions.forEach(s => {
-    Object.entries(s.tool_counts).forEach(([t, c]) => { allToolCounts[t] = (allToolCounts[t]||0) + c; });
-    s.subagents.forEach(sa => {
-      Object.entries(sa.tool_counts).forEach(([t, c]) => { allToolCounts[t] = (allToolCounts[t]||0) + c; });
+  // Tool distribution pie (pre-computed)
+  const toolDist = ov.tool_distribution || {};
+  const toolEntries = Object.entries(toolDist).sort((a,b) => b[1]-a[1]);
+  if (toolEntries.length) {
+    new Chart(document.getElementById('toolPieChart'), {
+      type: 'doughnut',
+      data: {
+        labels: toolEntries.map(e => e[0]),
+        datasets: [{ data: toolEntries.map(e => e[1]), backgroundColor: toolEntries.map(e => getToolColor(e[0])), borderWidth: 0 }]
+      },
+      options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 } } } } }
     });
-  });
-  const toolEntries = Object.entries(allToolCounts).sort((a,b) => b[1]-a[1]);
-  new Chart(document.getElementById('toolPieChart'), {
-    type: 'doughnut',
-    data: {
-      labels: toolEntries.map(e => e[0]),
-      datasets: [{ data: toolEntries.map(e => e[1]), backgroundColor: toolEntries.map(e => getToolColor(e[0])), borderWidth: 0 }]
-    },
-    options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 } } } } }
-  });
+  }
 
-  // Projects bar chart
-  const projectCounts = {};
-  sessions.forEach(s => {
-    const total = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
-    projectCounts[s.project] = (projectCounts[s.project]||0) + total;
-  });
-  const projEntries = Object.entries(projectCounts).sort((a,b) => b[1]-a[1]).slice(0, 10);
-  new Chart(document.getElementById('projectBarChart'), {
-    type: 'bar',
-    data: {
-      labels: projEntries.map(e => e[0]),
-      datasets: [{ data: projEntries.map(e => e[1]), backgroundColor: '#6c8cff', borderRadius: 4 }]
-    },
-    options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } } } }
-  });
+  // Projects bar chart (pre-computed)
+  const projChart = ov.projects_chart || {};
+  const projEntries = Object.entries(projChart).sort((a,b) => b[1]-a[1]).slice(0, 10);
+  if (projEntries.length) {
+    new Chart(document.getElementById('projectBarChart'), {
+      type: 'bar',
+      data: {
+        labels: projEntries.map(e => e[0]),
+        datasets: [{ data: projEntries.map(e => e[1]), backgroundColor: '#6c8cff', borderRadius: 4 }]
+      },
+      options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } } } }
+    });
+  }
 
-  // Timeline chart - group by week
-  const weekCounts = {};
-  sessions.forEach(s => {
-    if (!s.start_time) return;
-    const d = new Date(s.start_time);
-    const weekStart = new Date(d);
-    weekStart.setDate(d.getDate() - d.getDay());
-    const key = weekStart.toISOString().slice(0, 10);
-    weekCounts[key] = (weekCounts[key]||0) + 1;
-  });
-  const weekEntries = Object.entries(weekCounts).sort((a,b) => a[0].localeCompare(b[0]));
-  new Chart(document.getElementById('timelineChart'), {
-    type: 'line',
-    data: {
-      labels: weekEntries.map(e => fmtDate(e[0])),
-      datasets: [{ data: weekEntries.map(e => e[1]), borderColor: '#6c8cff', backgroundColor: 'rgba(108,140,255,0.1)', fill: true, tension: 0.3, pointRadius: 3 }]
-    },
-    options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
-  });
+  // Timeline chart (pre-computed weekly)
+  const weekData = ov.weekly_timeline || {};
+  const weekEntries = Object.entries(weekData).sort((a,b) => a[0].localeCompare(b[0]));
+  if (weekEntries.length) {
+    new Chart(document.getElementById('timelineChart'), {
+      type: 'line',
+      data: {
+        labels: weekEntries.map(e => fmtDate(e[0])),
+        datasets: [{ data: weekEntries.map(e => e[1]), borderColor: '#6c8cff', backgroundColor: 'rgba(108,140,255,0.1)', fill: true, tension: 0.3, pointRadius: 3 }]
+      },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
+    });
+  }
 
-  // File types chart
-  const allExtCounts = {};
-  sessions.forEach(s => {
-    Object.entries(s.file_extensions).forEach(([ext, c]) => { allExtCounts[ext] = (allExtCounts[ext]||0) + c; });
-  });
-  const extEntries = Object.entries(allExtCounts).sort((a,b) => b[1]-a[1]).slice(0, 12);
-  new Chart(document.getElementById('fileTypeChart'), {
-    type: 'bar',
-    data: {
-      labels: extEntries.map(e => e[0]),
-      datasets: [{ data: extEntries.map(e => e[1]), backgroundColor: '#a78bfa', borderRadius: 4 }]
-    },
-    options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
-  });
+  // File types chart (pre-computed)
+  const ftData = ov.file_types_chart || {};
+  const extEntries = Object.entries(ftData).sort((a,b) => b[1]-a[1]).slice(0, 12);
+  if (extEntries.length) {
+    new Chart(document.getElementById('fileTypeChart'), {
+      type: 'bar',
+      data: {
+        labels: extEntries.map(e => e[0]),
+        datasets: [{ data: extEntries.map(e => e[1]), backgroundColor: '#a78bfa', borderRadius: 4 }]
+      },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
+    });
+  }
 }
 
 // ---- EXPLORER ----
 function setupExplorer() {
   const projSelect = document.getElementById('projectFilter');
   const sessSelect = document.getElementById('sessionSelect');
+  const sessions = DASHBOARD_DATA.sessions || [];
 
-  DASHBOARD_DATA.projects.forEach(p => {
+  // Projects from overview or derive from sessions
+  const projects = (DASHBOARD_DATA.overview && DASHBOARD_DATA.overview.projects_list) || [...new Set(sessions.map(s => s.project))].sort();
+  projects.forEach(p => {
     const opt = document.createElement('option');
     opt.value = p; opt.textContent = p;
     projSelect.appendChild(opt);
   });
 
   function populateSessions(project) {
-    sessSelect.innerHTML = '<option value="">Select a session...</option>';
-    let filtered = DASHBOARD_DATA.sessions;
+    sessSelect.textContent = '';
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Select a session...';
+    sessSelect.appendChild(defaultOpt);
+
+    let filtered = sessions;
     if (project) filtered = filtered.filter(s => s.project === project);
 
     filtered.forEach(s => {
@@ -428,8 +448,7 @@ function setupExplorer() {
       opt.value = s.session_id;
       const date = s.start_time ? fmtDate(s.start_time) : '?';
       const preview = s.prompt_preview || s.slug || s.session_id.slice(0, 8);
-      const totalActions = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
-      opt.textContent = `[${date}] ${preview} (${totalActions} actions)`;
+      opt.textContent = `[${date}] ${preview} (${s.total_actions} actions)`;
       sessSelect.appendChild(opt);
     });
   }
@@ -441,17 +460,49 @@ function setupExplorer() {
     hideSessionDetail();
   });
 
-  sessSelect.addEventListener('change', () => {
+  // Async lazy-load session detail on selection
+  sessSelect.addEventListener('change', async () => {
     const sid = sessSelect.value;
     if (!sid) { hideSessionDetail(); return; }
-    const session = DASHBOARD_DATA.sessions.find(s => s.session_id === sid);
-    if (session) showSessionDetail(session);
+
+    // Show loading state
+    document.getElementById('explorerEmpty').style.display = 'none';
+    document.getElementById('sessionDetail').style.display = 'none';
+    document.getElementById('sessionLoading').style.display = 'block';
+
+    try {
+      const resp = await fetch(`${rootPath}/api/session/${sid}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const session = await resp.json();
+      document.getElementById('sessionLoading').style.display = 'none';
+      showSessionDetail(session);
+    } catch (err) {
+      document.getElementById('sessionLoading').style.display = 'none';
+      const el = document.getElementById('explorerEmpty');
+      el.style.display = 'block';
+      el.textContent = '';
+      const h3 = document.createElement('h3');
+      h3.textContent = 'Failed to load session';
+      const p = document.createElement('p');
+      p.textContent = err.message;
+      el.appendChild(h3);
+      el.appendChild(p);
+    }
   });
 }
 
 function hideSessionDetail() {
   document.getElementById('sessionDetail').style.display = 'none';
-  document.getElementById('explorerEmpty').style.display = 'block';
+  document.getElementById('sessionLoading').style.display = 'none';
+  const el = document.getElementById('explorerEmpty');
+  el.style.display = 'block';
+  el.textContent = '';
+  const h3 = document.createElement('h3');
+  h3.textContent = 'Select a session to explore';
+  const p = document.createElement('p');
+  p.textContent = 'Choose a project and session from the dropdowns above.';
+  el.appendChild(h3);
+  el.appendChild(p);
   currentSession = null;
 }
 
@@ -470,63 +521,57 @@ function showSessionDetail(s) {
   // Conversation flow
   const flowDiv = document.getElementById('conversationFlow');
   const turns = s.user_turns || [];
-  // Show flow if there are multiple real turns (more than just the first prompt)
   if (turns.length > 1) {
-    let flowHtml = `<details><summary>Conversation Flow (${turns.length} turns${s.interrupt_count ? ', ' + s.interrupt_count + ' interrupted' : ''})</summary><ul class="turn-list">`;
+    let flowHtml = `<details><summary>Conversation Flow (${esc(String(turns.length))} turns${s.interrupt_count ? ', ' + esc(String(s.interrupt_count)) + ' interrupted' : ''})</summary><ul class="turn-list">`;
     turns.forEach(t => {
       const cls = t.is_interrupt ? ' interrupt' : '';
       const timeStr = t.timestamp ? fmtTime(t.timestamp) : '';
-      flowHtml += `<li class="turn-item${cls}"><span class="turn-number">#${t.turn_number}</span>${timeStr ? '<span class="turn-time">' + timeStr + '</span>' : ''}${esc(t.text)}</li>`;
+      flowHtml += `<li class="turn-item${cls}"><span class="turn-number">#${esc(String(t.turn_number))}</span>${timeStr ? '<span class="turn-time">' + esc(timeStr) + '</span>' : ''}${esc(t.text)}</li>`;
     });
     flowHtml += '</ul></details>';
-    flowDiv.innerHTML = flowHtml;
+    setHtml(flowDiv, flowHtml);
     flowDiv.style.display = 'block';
   } else {
     flowDiv.style.display = 'none';
   }
 
   // Meta
-  const totalActions = s.total_tools + s.subagents.reduce((a, b) => a + b.tool_count, 0);
+  const subagents = s.subagents || [];
+  const totalActions = s.total_tools + subagents.reduce((a, b) => a + b.tool_count, 0);
   const wallClock = (s.start_time && s.end_time) ? calcDuration(s.start_time, s.end_time) : null;
   const activeTime = fmtDurationMs(s.total_active_duration_ms);
   let metaHtml = `<span><strong>Project:</strong> ${esc(s.project)}</span>`;
-  metaHtml += `<span><strong>Date:</strong> ${s.start_time ? fmtDateTime(s.start_time) : 'N/A'}</span>`;
+  metaHtml += `<span><strong>Date:</strong> ${s.start_time ? esc(fmtDateTime(s.start_time)) : 'N/A'}</span>`;
   if (s.model) metaHtml += `<span><strong>Model:</strong> ${esc(s.model)}</span>`;
-  metaHtml += `<span title="Number of user messages sent in this conversation"><strong>Turns:</strong> ${s.turn_count}</span>`;
+  metaHtml += `<span title="Number of user messages sent in this conversation"><strong>Turns:</strong> ${esc(String(s.turn_count))}</span>`;
   if (activeTime) {
-    metaHtml += `<span title="Active working time (wall clock: ${wallClock || 'N/A'})"><strong>Active:</strong> ${activeTime}${wallClock ? ' <span style="color:var(--text-dim);font-size:11px;">(wall: ' + wallClock + ')</span>' : ''}</span>`;
+    metaHtml += `<span title="Active working time (wall clock: ${esc(wallClock || 'N/A')})"><strong>Active:</strong> ${esc(activeTime)}${wallClock ? ' <span style="color:var(--text-dim);font-size:11px;">(wall: ' + esc(wallClock) + ')</span>' : ''}</span>`;
   } else if (wallClock) {
-    metaHtml += `<span><strong>Duration:</strong> ${wallClock}</span>`;
+    metaHtml += `<span><strong>Duration:</strong> ${esc(wallClock)}</span>`;
   }
-  // Tokens
   if (s.tokens) {
     const inp = s.tokens.input || 0;
     const out = s.tokens.output || 0;
     const cacheRead = s.tokens.cache_read || 0;
     const cachePct = inp > 0 ? Math.round(cacheRead / (inp + cacheRead) * 100) : 0;
     const tokenTip = cachePct > 0 ? `Cache hit: ${cachePct}%` : '';
-    metaHtml += `<span title="${tokenTip}"><strong>Tokens:</strong> ${fmtTokenCount(inp)} in / ${fmtTokenCount(out)} out${cachePct > 0 ? ' (' + cachePct + '% cached)' : ''}</span>`;
+    metaHtml += `<span title="${esc(tokenTip)}"><strong>Tokens:</strong> ${esc(fmtTokenCount(inp))} in / ${esc(fmtTokenCount(out))} out${cachePct > 0 ? ' (' + cachePct + '% cached)' : ''}</span>`;
   }
-  // Cost
   if (s.cost_estimate) {
-    metaHtml += `<span class="badge" style="background:#1a3d2e;color:var(--green)">~$${s.cost_estimate.toFixed(2)}</span>`;
+    metaHtml += `<span class="badge" style="background:#1a3d2e;color:var(--green)">~$${esc(s.cost_estimate.toFixed(2))}</span>`;
   }
-  metaHtml += `<span class="badge">${totalActions} actions</span>`;
-  if (s.subagents.length) metaHtml += `<span class="badge" style="background:var(--accent2)">${s.subagents.length} subagent${s.subagents.length>1?'s':''}</span>`;
-  // Thinking level
+  metaHtml += `<span class="badge">${esc(String(totalActions))} actions</span>`;
+  if (subagents.length) metaHtml += `<span class="badge" style="background:var(--accent2)">${esc(String(subagents.length))} subagent${subagents.length>1?'s':''}</span>`;
   if (s.thinking_level) metaHtml += `<span class="badge" style="background:#2e1a3d;color:var(--accent2)">thinking: ${esc(s.thinking_level)}</span>`;
-  // Permission mode
   if (s.permission_mode) metaHtml += `<span class="badge" style="background:var(--surface2);color:var(--text-dim)">${esc(s.permission_mode)}</span>`;
-  // Tool errors
-  if (s.tool_errors > 0) metaHtml += `<span class="badge" style="background:#3d1a1a;color:var(--red)">${s.tool_errors} error${s.tool_errors>1?'s':''}</span>`;
-  // Interrupts
-  if (s.interrupt_count > 0) metaHtml += `<span class="badge badge-orange">${s.interrupt_count} interrupt${s.interrupt_count>1?'s':''}</span>`;
-  document.getElementById('sessionMeta').innerHTML = metaHtml;
+  if (s.tool_errors > 0) metaHtml += `<span class="badge" style="background:#3d1a1a;color:var(--red)">${esc(String(s.tool_errors))} error${s.tool_errors>1?'s':''}</span>`;
+  if (s.interrupt_count > 0) metaHtml += `<span class="badge badge-orange">${esc(String(s.interrupt_count))} interrupt${s.interrupt_count>1?'s':''}</span>`;
+  setHtmlById('sessionMeta', metaHtml);
 
   // Tool donut chart (combined: parent + subagent tools)
   if (sessionToolChart) sessionToolChart.destroy();
   const combinedToolCounts = { ...s.tool_counts };
-  s.subagents.forEach(sa => {
+  subagents.forEach(sa => {
     Object.entries(sa.tool_counts).forEach(([t, c]) => {
       combinedToolCounts[t] = (combinedToolCounts[t] || 0) + c;
     });
@@ -542,9 +587,8 @@ function showSessionDetail(s) {
   });
 
   // File operations table
-  const fileEntries = Object.entries(s.files_touched);
+  const fileEntries = Object.entries(s.files_touched || {});
   if (fileEntries.length) {
-    // Group by extension
     const byExt = {};
     fileEntries.forEach(([path, ops]) => {
       const ext = path.split('.').pop() || '(none)';
@@ -571,17 +615,16 @@ function showSessionDetail(s) {
     }
     if (fileEntries.length > 30) html += `<tr><td colspan="4" style="color:var(--text-dim)">...and ${fileEntries.length - 30} more files</td></tr>`;
     html += '</tbody></table>';
-    document.getElementById('fileOpsTable').innerHTML = html;
+    setHtmlById('fileOpsTable', html);
   } else {
-    document.getElementById('fileOpsTable').innerHTML = '<p style="color:var(--text-dim);font-size:13px;">No file operations</p>';
+    setHtmlById('fileOpsTable', '<p style="color:var(--text-dim);font-size:13px;">No file operations</p>');
   }
 
-  // Bash category doughnut chart + commands table with category pills
-  if (s.bash_commands.length) {
+  // Bash commands
+  const bashCmds = s.bash_commands || [];
+  if (bashCmds.length) {
     const catSummary = s.bash_category_summary || {};
-    window._bashCommands = s.bash_commands;
 
-    // Render doughnut chart
     if (bashCatChart) bashCatChart.destroy();
     const catEntries = Object.entries(catSummary).sort((a,b) => b[1]-a[1]);
     if (catEntries.length) {
@@ -605,10 +648,9 @@ function showSessionDetail(s) {
     }
 
     let html = '';
-    // Category pills with tooltip descriptions
     if (Object.keys(catSummary).length > 1) {
       html += '<div class="category-pills" id="bashCatPills">';
-      html += `<span class="cat-pill active" data-cat="all" onclick="filterBashCat('all')">All<span class="cat-count">${s.bash_commands.reduce((a,c)=>a+c.count,0)}</span></span>`;
+      html += `<span class="cat-pill active" data-cat="all" onclick="filterBashCat('all')">All<span class="cat-count">${bashCmds.reduce((a,c)=>a+c.count,0)}</span></span>`;
       Object.entries(catSummary).forEach(([cat, cnt]) => {
         const desc = BASH_CAT_DESCRIPTIONS[cat] || '';
         html += `<span class="cat-pill" data-cat="${esc(cat)}" title="${esc(desc)}" onclick="filterBashCat('${esc(cat)}')">${esc(cat)}<span class="cat-count"> ${cnt}</span></span>`;
@@ -616,23 +658,23 @@ function showSessionDetail(s) {
       html += '</div>';
     }
     html += '<table><thead><tr><th>Command</th><th>Category</th><th>Count</th></tr></thead><tbody id="bashTableBody">';
-    s.bash_commands.slice(0, 25).forEach(c => {
+    bashCmds.slice(0, 25).forEach(c => {
       html += `<tr data-cat="${esc(c.category || 'Other')}"><td class="mono">${esc(c.command)}</td><td><span style="font-size:11px;color:var(--text-dim)">${esc(c.category || 'Other')}</span></td><td>${c.count}</td></tr>`;
     });
-    if (s.bash_commands.length > 25) html += `<tr class="bash-overflow" data-cat="all"><td colspan="3" style="color:var(--text-dim)">...and ${s.bash_commands.length - 25} more</td></tr>`;
+    if (bashCmds.length > 25) html += `<tr class="bash-overflow" data-cat="all"><td colspan="3" style="color:var(--text-dim)">...and ${bashCmds.length - 25} more</td></tr>`;
     html += '</tbody></table>';
-    document.getElementById('bashTable').innerHTML = html;
+    setHtmlById('bashTable', html);
   } else {
-    document.getElementById('bashTable').innerHTML = '<p style="color:var(--text-dim);font-size:13px;">No bash commands</p>';
+    setHtmlById('bashTable', '<p style="color:var(--text-dim);font-size:13px;">No bash commands</p>');
     document.getElementById('bashChartBox').style.display = 'none';
     if (bashCatChart) { bashCatChart.destroy(); bashCatChart = null; }
   }
 
   // Subagents
   const saDiv = document.getElementById('subagentsSection');
-  if (s.subagents.length) {
-    let html = '<div class="table-box"><h3>Subagents (' + s.subagents.length + ')</h3>';
-    s.subagents.forEach((sa, idx) => {
+  if (subagents.length) {
+    let html = '<div class="table-box"><h3>Subagents (' + esc(String(subagents.length)) + ')</h3>';
+    subagents.forEach((sa, idx) => {
       const toolSummary = Object.entries(sa.tool_counts).map(([t,c]) => `${t}: ${c}`).join(', ');
       const agentType = sa.subagent_type || 'agent';
       const taskDesc = sa.task_description || '';
@@ -641,26 +683,26 @@ function showSessionDetail(s) {
       const saActive = fmtDurationMs(sa.active_duration_ms);
       html += `<div class="subagent-card">
         <div class="subagent-header" onclick="toggleSubagent(${idx})">
-          <div>${typeLabel}<span class="agent-label">${esc(headerLabel)}</span> <span class="agent-meta">${sa.tool_count} actions${saActive ? ' | ' + saActive : ''}</span></div>
+          <div>${typeLabel}<span class="agent-label">${esc(headerLabel)}</span> <span class="agent-meta">${esc(String(sa.tool_count))} actions${saActive ? ' | ' + esc(saActive) : ''}</span></div>
           <span class="arrow" id="saArrow${idx}">&#9654;</span>
         </div>
         <div class="subagent-body" id="saBody${idx}">
           ${sa.description ? `<div class="subagent-desc"><strong>Task prompt:</strong> ${esc(sa.description)}</div>` : ''}
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">${esc(toolSummary)}</div>
           <table><thead><tr><th>#</th><th>Tool</th><th>Detail</th></tr></thead><tbody>`;
-      sa.tool_calls.slice(0, 30).forEach(tc => {
+      (sa.tool_calls || []).slice(0, 30).forEach(tc => {
         html += `<tr><td>${tc.seq}</td><td><span class="tool-badge ${getToolBadgeClass(tc.tool)}">${esc(tc.tool)}</span></td><td class="mono">${esc(tc.detail.slice(0, 120))}</td></tr>`;
       });
-      if (sa.tool_calls.length > 30) html += `<tr><td colspan="3" style="color:var(--text-dim)">...and ${sa.tool_calls.length - 30} more</td></tr>`;
+      if ((sa.tool_calls || []).length > 30) html += `<tr><td colspan="3" style="color:var(--text-dim)">...and ${sa.tool_calls.length - 30} more</td></tr>`;
       html += '</tbody></table></div></div>';
     });
     html += '</div>';
-    saDiv.innerHTML = html;
+    setHtml(saDiv, html);
   } else {
-    saDiv.innerHTML = '';
+    saDiv.textContent = '';
   }
 
-  // Also update the action log tab
+  // Update the action log tab
   renderActionLog(s);
 }
 
@@ -672,11 +714,9 @@ function toggleSubagent(idx) {
 }
 
 function filterBashCat(cat) {
-  // Update pill active states
   document.querySelectorAll('#bashCatPills .cat-pill').forEach(p => {
     p.classList.toggle('active', p.dataset.cat === cat);
   });
-  // Filter table rows
   document.querySelectorAll('#bashTableBody tr').forEach(row => {
     if (cat === 'all') {
       row.style.display = '';
@@ -691,28 +731,28 @@ function renderActionLog(s) {
   document.getElementById('logNoSession').style.display = 'none';
   document.getElementById('logActive').style.display = 'block';
 
-  // Combine parent + subagent calls
-  const allCalls = [...s.tool_calls];
-  s.subagents.forEach(sa => {
-    sa.tool_calls.forEach(tc => {
+  const allCalls = [...(s.tool_calls || [])];
+  (s.subagents || []).forEach(sa => {
+    (sa.tool_calls || []).forEach(tc => {
       allCalls.push({ ...tc, is_subagent: true, agent_id: sa.agent_id });
     });
   });
 
-  // Sort by time then sequence
   allCalls.sort((a, b) => {
     if (a.time && b.time) return a.time.localeCompare(b.time);
     return 0;
   });
-
-  // Re-number
   allCalls.forEach((c, i) => c._seq = i + 1);
 
-  // Tool filter checkboxes
   const toolTypes = [...new Set(allCalls.map(c => c.tool))].sort();
   logToolFilters = new Set(toolTypes);
   const filterDiv = document.getElementById('toolFilters');
-  filterDiv.innerHTML = '<strong style="font-size:12px;color:var(--text-dim);">Filter:</strong>';
+  filterDiv.textContent = '';
+  const filterLabel = document.createElement('strong');
+  filterLabel.style.fontSize = '12px';
+  filterLabel.style.color = 'var(--text-dim)';
+  filterLabel.textContent = 'Filter:';
+  filterDiv.appendChild(filterLabel);
   toolTypes.forEach(t => {
     const label = document.createElement('label');
     const cb = document.createElement('input');
@@ -740,24 +780,21 @@ function renderLogPage(allCalls) {
   const page = filtered.slice(start, start + LOG_PAGE_SIZE);
 
   const tbody = document.getElementById('logTableBody');
-  tbody.innerHTML = '';
+  tbody.textContent = '';
   page.forEach(c => {
     const tr = document.createElement('tr');
     const time = c.time ? fmtTime(c.time) : '';
     const source = c.is_subagent ? `<span style="color:var(--accent2);font-size:11px;">agent-${esc(c.agent_id || '?')}</span>` : '<span style="color:var(--text-dim);font-size:11px;">main</span>';
-    tr.innerHTML = `<td>${c._seq}</td><td class="mono">${time}</td><td><span class="tool-badge ${getToolBadgeClass(c.tool)}">${esc(c.tool)}</span></td><td class="mono" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(c.detail)}">${esc(c.detail.slice(0, 150))}</td><td>${source}</td>`;
+    setHtml(tr, `<td>${c._seq}</td><td class="mono">${esc(time)}</td><td><span class="tool-badge ${getToolBadgeClass(c.tool)}">${esc(c.tool)}</span></td><td class="mono" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(c.detail)}">${esc(c.detail.slice(0, 150))}</td><td>${source}</td>`);
     tbody.appendChild(tr);
   });
 
-  // Pagination
-  const pagDiv = document.getElementById('logPagination');
-  pagDiv.innerHTML = `
+  setHtmlById('logPagination', `
     <button onclick="logPageNav(-1)" ${logPage <= 1 ? 'disabled' : ''}>Prev</button>
     <span class="page-info">Page ${logPage} of ${totalPages} (${filtered.length} actions)</span>
     <button onclick="logPageNav(1)" ${logPage >= totalPages ? 'disabled' : ''}>Next</button>
-  `;
+  `);
 
-  // Store for pagination
   window._logAllCalls = allCalls;
 }
 
