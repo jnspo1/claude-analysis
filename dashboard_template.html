@@ -183,34 +183,37 @@
   <div id="overview" class="tab-panel active">
     <div id="rebuildBanner" style="display:none;" class="rebuild-banner">Cache is being built in the background. Data will appear shortly.</div>
     <div class="cards" id="summaryCards"></div>
-    <div class="charts-grid">
-      <div class="chart-box">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <h3 style="margin:0">Tool Distribution</h3>
-          <div class="category-pills" id="rangeChartPills" style="margin:0">
-            <span class="cat-pill active" data-r="all" onclick="switchAllRanges('all')">All</span>
-            <span class="cat-pill" data-r="1d" onclick="switchAllRanges('1d')">Day</span>
-            <span class="cat-pill" data-r="7d" onclick="switchAllRanges('7d')">Week</span>
-            <span class="cat-pill" data-r="30d" onclick="switchAllRanges('30d')">Month</span>
-          </div>
+    <div style="margin-bottom:24px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <h3 style="margin:0;font-size:14px;font-weight:600;color:var(--text-dim)">Activity by Time Range</h3>
+        <div class="category-pills" id="rangeChartPills" style="margin:0">
+          <span class="cat-pill active" data-r="all" onclick="switchAllRanges('all')">All</span>
+          <span class="cat-pill" data-r="1d" onclick="switchAllRanges('1d')">Day</span>
+          <span class="cat-pill" data-r="7d" onclick="switchAllRanges('7d')">Week</span>
+          <span class="cat-pill" data-r="30d" onclick="switchAllRanges('30d')">Month</span>
         </div>
-        <canvas id="toolPieChart"></canvas>
       </div>
-      <div class="chart-box"><h3>Top Projects by Actions</h3><canvas id="projectBarChart"></canvas></div>
+      <div class="charts-grid">
+        <div class="chart-box"><h3>Tool Distribution</h3><canvas id="toolPieChart"></canvas></div>
+        <div class="chart-box"><h3>Top Projects by Actions</h3><canvas id="projectBarChart"></canvas></div>
+        <div class="chart-box"><h3>File Types Touched</h3><canvas id="fileTypeChart"></canvas></div>
+        <div class="chart-box"><h3>Cost by Project</h3><canvas id="costByProjectChart"></canvas></div>
+      </div>
     </div>
-    <div class="charts-grid">
-      <div class="chart-box">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <h3 style="margin:0">Sessions Over Time</h3>
-          <div class="category-pills" id="timelinePills" style="margin:0">
-            <span class="cat-pill" data-g="daily" onclick="switchTimeline('daily')">Daily</span>
-            <span class="cat-pill active" data-g="weekly" onclick="switchTimeline('weekly')">Weekly</span>
-            <span class="cat-pill" data-g="monthly" onclick="switchTimeline('monthly')">Monthly</span>
-          </div>
+    <div style="margin-bottom:24px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <h3 style="margin:0;font-size:14px;font-weight:600;color:var(--text-dim)">Trends Over Time</h3>
+        <div class="category-pills" id="timelinePills" style="margin:0">
+          <span class="cat-pill" data-g="daily" onclick="switchTimeline('daily')">Daily</span>
+          <span class="cat-pill active" data-g="weekly" onclick="switchTimeline('weekly')">Weekly</span>
+          <span class="cat-pill" data-g="monthly" onclick="switchTimeline('monthly')">Monthly</span>
         </div>
-        <canvas id="timelineChart"></canvas>
       </div>
-      <div class="chart-box"><h3>File Types Touched</h3><canvas id="fileTypeChart"></canvas></div>
+      <div class="charts-grid" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="chart-box"><h3>Sessions</h3><canvas id="timelineChart"></canvas></div>
+        <div class="chart-box"><h3>Actions</h3><canvas id="actionsTimelineChart"></canvas></div>
+        <div class="chart-box"><h3>Active Time</h3><canvas id="activeTimeChart"></canvas></div>
+      </div>
     </div>
   </div>
 
@@ -389,12 +392,18 @@ function renderOverview() {
   window._projectBarInst = null;
   window._timelineInst = null;
   window._fileTypeInst = null;
+  window._costByProjectInst = null;
+  window._actionsTimelineInst = null;
+  window._activeTimeInst = null;
 
   // Render initial charts
   renderToolPie(ov.tool_distribution || {});
   renderProjectBar(ov.projects_chart || {});
   renderTimeline(ov.weekly_timeline || {});
   renderFileTypes(ov.file_types_chart || {});
+  renderCostByProject(ov.cost_by_project || {});
+  renderActionsTimeline(ov.actions_weekly || {});
+  renderActiveTime(ov.active_time_weekly || {});
 }
 
 function renderToolPie(data) {
@@ -453,12 +462,84 @@ function renderFileTypes(data) {
   });
 }
 
+function renderCostByProject(data) {
+  const entries = Object.entries(data).sort((a,b) => b[1]-a[1]).slice(0, 10);
+  if (window._costByProjectInst) window._costByProjectInst.destroy();
+  if (!entries.length) return;
+  window._costByProjectInst = new Chart(document.getElementById('costByProjectChart'), {
+    type: 'bar',
+    data: {
+      labels: entries.map(e => e[0]),
+      datasets: [{ data: entries.map(e => e[1]), backgroundColor: '#4ade80', borderRadius: 4 }]
+    },
+    options: {
+      responsive: true, indexAxis: 'y',
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.x.toFixed(2) } } },
+      scales: {
+        x: { ticks: { color: '#8b8fa3', callback: v => '$' + v.toFixed(0) }, grid: { color: '#2e3347' } },
+        y: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+function renderActionsTimeline(data) {
+  const entries = Object.entries(data).sort((a,b) => a[0].localeCompare(b[0]));
+  if (window._actionsTimelineInst) window._actionsTimelineInst.destroy();
+  if (!entries.length) return;
+  window._actionsTimelineInst = new Chart(document.getElementById('actionsTimelineChart'), {
+    type: 'line',
+    data: {
+      labels: entries.map(e => fmtDate(e[0])),
+      datasets: [
+        { label: 'Total', data: entries.map(e => e[1].total), borderColor: '#6c8cff', backgroundColor: 'rgba(108,140,255,0.1)', fill: false, tension: 0.3, pointRadius: 3, borderWidth: 2.5 },
+        { label: 'Direct', data: entries.map(e => e[1].direct), borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.1)', fill: false, tension: 0.3, pointRadius: 2, borderWidth: 1.5 },
+        { label: 'Subagent', data: entries.map(e => e[1].subagent), borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', fill: false, tension: 0.3, pointRadius: 2, borderWidth: 1.5 }
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'top', labels: { color: '#8b8fa3', font: { size: 11 }, usePointStyle: true, pointStyle: 'line' } } },
+      scales: {
+        x: { ticks: { color: '#8b8fa3', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3347' } },
+        y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true }
+      }
+    }
+  });
+}
+
+function renderActiveTime(data) {
+  const entries = Object.entries(data).sort((a,b) => a[0].localeCompare(b[0]));
+  if (window._activeTimeInst) window._activeTimeInst.destroy();
+  if (!entries.length) return;
+  const hours = entries.map(e => e[1] / 3600000);
+  window._activeTimeInst = new Chart(document.getElementById('activeTimeChart'), {
+    type: 'line',
+    data: {
+      labels: entries.map(e => fmtDate(e[0])),
+      datasets: [{ data: hours, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.1)', fill: true, tension: 0.3, pointRadius: 3 }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + ' hours' } } },
+      scales: {
+        x: { ticks: { color: '#8b8fa3', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3347' } },
+        y: { ticks: { color: '#8b8fa3', callback: v => v.toFixed(0) + 'h' }, grid: { color: '#2e3347' }, beginAtZero: true }
+      }
+    }
+  });
+}
+
 // ---- TIMELINE GRANULARITY PILLS ----
 function switchTimeline(granularity) {
   const ov = DASHBOARD_DATA.overview;
   if (!ov) return;
-  const map = { daily: ov.daily_timeline, weekly: ov.weekly_timeline, monthly: ov.monthly_timeline };
-  renderTimeline(map[granularity] || {});
+  const sessMap = { daily: ov.daily_timeline, weekly: ov.weekly_timeline, monthly: ov.monthly_timeline };
+  const actMap = { daily: ov.actions_daily, weekly: ov.actions_weekly, monthly: ov.actions_monthly };
+  const timeMap = { daily: ov.active_time_daily, weekly: ov.active_time_weekly, monthly: ov.active_time_monthly };
+  renderTimeline(sessMap[granularity] || {});
+  renderActionsTimeline(actMap[granularity] || {});
+  renderActiveTime(timeMap[granularity] || {});
   document.querySelectorAll('#timelinePills .cat-pill').forEach(p => {
     p.classList.toggle('active', p.dataset.g === granularity);
   });
@@ -472,6 +553,7 @@ function switchAllRanges(range) {
   renderToolPie(ov['tool_distribution' + suffix] || {});
   renderProjectBar(ov['projects_chart' + suffix] || {});
   renderFileTypes(ov['file_types_chart' + suffix] || {});
+  renderCostByProject(ov['cost_by_project' + suffix] || {});
   document.querySelectorAll('#rangeChartPills .cat-pill').forEach(p => {
     p.classList.toggle('active', p.dataset.r === range);
   });

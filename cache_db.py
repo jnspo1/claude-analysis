@@ -90,7 +90,17 @@ CREATE TABLE IF NOT EXISTS global_aggregates (
     projects_chart_30d_json     TEXT,
     file_types_chart_1d_json    TEXT,
     file_types_chart_7d_json    TEXT,
-    file_types_chart_30d_json   TEXT
+    file_types_chart_30d_json   TEXT,
+    cost_by_project_json        TEXT,
+    cost_by_project_1d_json     TEXT,
+    cost_by_project_7d_json     TEXT,
+    cost_by_project_30d_json    TEXT,
+    actions_daily_json          TEXT,
+    actions_weekly_json         TEXT,
+    actions_monthly_json        TEXT,
+    active_time_daily_json      TEXT,
+    active_time_weekly_json     TEXT,
+    active_time_monthly_json    TEXT
 );
 """
 
@@ -120,6 +130,16 @@ def _migrate_global_aggregates(conn: sqlite3.Connection) -> None:
         ("file_types_chart_1d_json", "TEXT"),
         ("file_types_chart_7d_json", "TEXT"),
         ("file_types_chart_30d_json", "TEXT"),
+        ("cost_by_project_json", "TEXT"),
+        ("cost_by_project_1d_json", "TEXT"),
+        ("cost_by_project_7d_json", "TEXT"),
+        ("cost_by_project_30d_json", "TEXT"),
+        ("actions_daily_json", "TEXT"),
+        ("actions_weekly_json", "TEXT"),
+        ("actions_monthly_json", "TEXT"),
+        ("active_time_daily_json", "TEXT"),
+        ("active_time_weekly_json", "TEXT"),
+        ("active_time_monthly_json", "TEXT"),
     ]
     for col_name, col_type in new_columns:
         try:
@@ -327,6 +347,22 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
     file_types_7d: Counter = Counter()
     file_types_30d: Counter = Counter()
 
+    # Cost by project (all-time + time-filtered)
+    cost_by_project: Counter = Counter()
+    cost_by_project_1d: Counter = Counter()
+    cost_by_project_7d: Counter = Counter()
+    cost_by_project_30d: Counter = Counter()
+
+    # Actions over time: {date_key: {direct: N, subagent: N, total: N}}
+    actions_daily: Dict[str, Dict[str, int]] = {}
+    actions_weekly: Dict[str, Dict[str, int]] = {}
+    actions_monthly: Dict[str, Dict[str, int]] = {}
+
+    # Active time over time: {date_key: total_ms}
+    active_time_daily: Dict[str, int] = {}
+    active_time_weekly: Dict[str, int] = {}
+    active_time_monthly: Dict[str, int] = {}
+
     for row in rows:
         total_tools += row["total_tools"]
         total_actions += row["total_actions"]
@@ -342,6 +378,9 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
 
         # Project actions
         projects[row["project"]] += row["total_actions"] or 0
+
+        # Cost by project (all-time)
+        cost_by_project[row["project"]] += row["cost_estimate"] or 0
 
         # Parse tool counts and file extensions for this session
         try:
@@ -396,6 +435,7 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
 
                 if age_days <= 1:
                     projects_1d[row["project"]] += actions
+                    cost_by_project_1d[row["project"]] += row["cost_estimate"] or 0
                     for tool, count in tc.items():
                         tool_dist_1d[tool] += count
                     for ext, count in fe.items():
@@ -403,6 +443,7 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
 
                 if age_days <= 7:
                     projects_7d[row["project"]] += actions
+                    cost_by_project_7d[row["project"]] += row["cost_estimate"] or 0
                     for tool, count in tc.items():
                         tool_dist_7d[tool] += count
                     for ext, count in fe.items():
@@ -410,10 +451,30 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
 
                 if age_days <= 30:
                     projects_30d[row["project"]] += actions
+                    cost_by_project_30d[row["project"]] += row["cost_estimate"] or 0
                     for tool, count in tc.items():
                         tool_dist_30d[tool] += count
                     for ext, count in fe.items():
                         file_types_30d[ext] += count
+
+                # Actions over time (direct, subagent, total)
+                direct = row["total_tools"] or 0
+                subagent = actions - direct
+                day_key = dt.date().isoformat()
+                week_key = week_start.isoformat()
+                month_key = dt.strftime("%Y-%m")
+
+                for bucket, key in [(actions_daily, day_key), (actions_weekly, week_key), (actions_monthly, month_key)]:
+                    if key not in bucket:
+                        bucket[key] = {"direct": 0, "subagent": 0, "total": 0}
+                    bucket[key]["direct"] += direct
+                    bucket[key]["subagent"] += subagent
+                    bucket[key]["total"] += actions
+
+                # Active time over time
+                active_ms = row["total_active_duration_ms"] or 0
+                for bucket, key in [(active_time_daily, day_key), (active_time_weekly, week_key), (active_time_monthly, month_key)]:
+                    bucket[key] = bucket.get(key, 0) + active_ms
 
             except (ValueError, TypeError):
                 pass
@@ -430,6 +491,18 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
     file_types_chart = dict(Counter(file_types).most_common(15))
     tool_dist = dict(tool_distribution.most_common())
 
+    # Sort actions/active_time dicts by date key
+    actions_daily_sorted = dict(sorted(actions_daily.items()))
+    actions_weekly_sorted = dict(sorted(actions_weekly.items()))
+    actions_monthly_sorted = dict(sorted(actions_monthly.items()))
+    active_time_daily_sorted = dict(sorted(active_time_daily.items()))
+    active_time_weekly_sorted = dict(sorted(active_time_weekly.items()))
+    active_time_monthly_sorted = dict(sorted(active_time_monthly.items()))
+
+    # Round cost values for cleaner JSON
+    def _round_cost_counter(c: Counter) -> dict:
+        return {k: round(v, 4) for k, v in c.most_common(15)}
+
     conn.execute(
         """INSERT OR REPLACE INTO global_aggregates (
             id, generated_at, total_sessions, total_tools, total_actions,
@@ -442,8 +515,11 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
             file_types_chart_json, projects_list_json,
             tool_distribution_1d_json, tool_distribution_7d_json, tool_distribution_30d_json,
             projects_chart_1d_json, projects_chart_7d_json, projects_chart_30d_json,
-            file_types_chart_1d_json, file_types_chart_7d_json, file_types_chart_30d_json
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            file_types_chart_1d_json, file_types_chart_7d_json, file_types_chart_30d_json,
+            cost_by_project_json, cost_by_project_1d_json, cost_by_project_7d_json, cost_by_project_30d_json,
+            actions_daily_json, actions_weekly_json, actions_monthly_json,
+            active_time_daily_json, active_time_weekly_json, active_time_monthly_json
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             datetime.now().isoformat(),
             total_sessions,
@@ -476,6 +552,16 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
             json.dumps(dict(Counter(file_types_1d).most_common(15))),
             json.dumps(dict(Counter(file_types_7d).most_common(15))),
             json.dumps(dict(Counter(file_types_30d).most_common(15))),
+            json.dumps(_round_cost_counter(cost_by_project)),
+            json.dumps(_round_cost_counter(cost_by_project_1d)),
+            json.dumps(_round_cost_counter(cost_by_project_7d)),
+            json.dumps(_round_cost_counter(cost_by_project_30d)),
+            json.dumps(actions_daily_sorted),
+            json.dumps(actions_weekly_sorted),
+            json.dumps(actions_monthly_sorted),
+            json.dumps(active_time_daily_sorted),
+            json.dumps(active_time_weekly_sorted),
+            json.dumps(active_time_monthly_sorted),
         ),
     )
     conn.commit()
@@ -522,6 +608,16 @@ def get_overview_payload(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
         "file_types_chart_1d": json.loads(row["file_types_chart_1d_json"] or "{}"),
         "file_types_chart_7d": json.loads(row["file_types_chart_7d_json"] or "{}"),
         "file_types_chart_30d": json.loads(row["file_types_chart_30d_json"] or "{}"),
+        "cost_by_project": json.loads(row["cost_by_project_json"] or "{}"),
+        "cost_by_project_1d": json.loads(row["cost_by_project_1d_json"] or "{}"),
+        "cost_by_project_7d": json.loads(row["cost_by_project_7d_json"] or "{}"),
+        "cost_by_project_30d": json.loads(row["cost_by_project_30d_json"] or "{}"),
+        "actions_daily": json.loads(row["actions_daily_json"] or "{}"),
+        "actions_weekly": json.loads(row["actions_weekly_json"] or "{}"),
+        "actions_monthly": json.loads(row["actions_monthly_json"] or "{}"),
+        "active_time_daily": json.loads(row["active_time_daily_json"] or "{}"),
+        "active_time_weekly": json.loads(row["active_time_weekly_json"] or "{}"),
+        "active_time_monthly": json.loads(row["active_time_monthly_json"] or "{}"),
     }
 
 
