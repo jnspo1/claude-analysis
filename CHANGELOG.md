@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-16: Chart Reorganization with Cost and Activity Aggregations
+- **Added**: 10 new columns to global_aggregates schema (cost_by_project, actions_daily/weekly/monthly, active_time_daily/weekly/monthly with time-filtered variants) to support multi-timescale visualizations.
+- **Added**: Migration support in cache_db.py for schema evolution with backward compatibility.
+- **Added**: Aggregation logic to compute cost breakdown by project and action/activity timelines at daily/weekly/monthly granularity, enabling accurate trend analysis over different time windows.
+- **Added**: New Chart.js visualizations: Cost by Project pie chart (Activity by Time Range group), Actions breakdown timeline (Trends Over Time group), and Active Time timeline with three render functions (renderCostByProject, renderActionsTimeline, renderActiveTime).
+- **Changed**: Dashboard layout reorganized into two grouped sections with shared pill controls: "Activity by Time Range" (2x2 grid controlling Tool Distribution, Top Projects, File Types, Cost by Project) and "Trends Over Time" (3-column grid controlling Sessions, Actions, Active Time charts). Synchronized pill handlers allow users to apply time-range filters across multiple charts simultaneously.
+- **Updated**: Overview payload now returns all 10 new aggregation fields for client-side visualization.
+
 #### 2026-02-16: Token Display Fix and Time-Range Chart Filters
 - **Fixed**: Token card now shows all 4 token types (input + output + cache_creation + cache_read) instead of just input + output. Display changed from misleading "3.2M" to accurate "812M" reflecting true token volume.
 - **Fixed**: Cost estimation now includes cache_creation tokens charged at 125% of input rate, matching Anthropic's actual pricing for cache writes.
