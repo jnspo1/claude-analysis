@@ -59,26 +59,38 @@ CREATE TABLE IF NOT EXISTS session_details (
 );
 
 CREATE TABLE IF NOT EXISTS global_aggregates (
-    id                      INTEGER PRIMARY KEY CHECK (id = 1),
-    generated_at            TEXT,
-    total_sessions          INTEGER,
-    total_tools             INTEGER,
-    total_actions           INTEGER,
-    total_cost              REAL,
-    total_input_tokens      INTEGER,
-    total_output_tokens     INTEGER,
-    total_cache_read_tokens INTEGER,
-    total_active_ms         INTEGER,
-    date_range_start        TEXT,
-    date_range_end          TEXT,
-    project_count           INTEGER,
-    subagent_count          INTEGER,
-    subagent_tools          INTEGER,
-    tool_distribution_json  TEXT,
-    projects_chart_json     TEXT,
-    weekly_timeline_json    TEXT,
-    file_types_chart_json   TEXT,
-    projects_list_json      TEXT
+    id                          INTEGER PRIMARY KEY CHECK (id = 1),
+    generated_at                TEXT,
+    total_sessions              INTEGER,
+    total_tools                 INTEGER,
+    total_actions               INTEGER,
+    total_cost                  REAL,
+    total_input_tokens          INTEGER,
+    total_output_tokens         INTEGER,
+    total_cache_read_tokens     INTEGER,
+    total_cache_creation_tokens INTEGER,
+    total_active_ms             INTEGER,
+    date_range_start            TEXT,
+    date_range_end              TEXT,
+    project_count               INTEGER,
+    subagent_count              INTEGER,
+    subagent_tools              INTEGER,
+    tool_distribution_json      TEXT,
+    projects_chart_json         TEXT,
+    weekly_timeline_json        TEXT,
+    daily_timeline_json         TEXT,
+    monthly_timeline_json       TEXT,
+    file_types_chart_json       TEXT,
+    projects_list_json          TEXT,
+    tool_distribution_1d_json   TEXT,
+    tool_distribution_7d_json   TEXT,
+    tool_distribution_30d_json  TEXT,
+    projects_chart_1d_json      TEXT,
+    projects_chart_7d_json      TEXT,
+    projects_chart_30d_json     TEXT,
+    file_types_chart_1d_json    TEXT,
+    file_types_chart_7d_json    TEXT,
+    file_types_chart_30d_json   TEXT
 );
 """
 
@@ -93,10 +105,37 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_global_aggregates(conn: sqlite3.Connection) -> None:
+    """Add new columns to global_aggregates if they don't exist yet."""
+    new_columns = [
+        ("total_cache_creation_tokens", "INTEGER"),
+        ("daily_timeline_json", "TEXT"),
+        ("monthly_timeline_json", "TEXT"),
+        ("tool_distribution_1d_json", "TEXT"),
+        ("tool_distribution_7d_json", "TEXT"),
+        ("tool_distribution_30d_json", "TEXT"),
+        ("projects_chart_1d_json", "TEXT"),
+        ("projects_chart_7d_json", "TEXT"),
+        ("projects_chart_30d_json", "TEXT"),
+        ("file_types_chart_1d_json", "TEXT"),
+        ("file_types_chart_7d_json", "TEXT"),
+        ("file_types_chart_30d_json", "TEXT"),
+    ]
+    for col_name, col_type in new_columns:
+        try:
+            conn.execute(
+                f"ALTER TABLE global_aggregates ADD COLUMN {col_name} {col_type}"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
+
+
 def init_db() -> sqlite3.Connection:
     """Create schema and return connection."""
     conn = get_connection()
     conn.executescript(_SCHEMA)
+    _migrate_global_aggregates(conn)
     conn.commit()
     return conn
 
@@ -254,6 +293,8 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
         conn.commit()
         return
 
+    now = datetime.now()
+
     total_sessions = len(rows)
     total_tools = 0
     total_actions = 0
@@ -261,6 +302,7 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
     total_input_tokens = 0
     total_output_tokens = 0
     total_cache_read = 0
+    total_cache_creation = 0
     total_active_ms = 0
     total_subagents = 0
     total_subagent_tools = 0
@@ -271,6 +313,19 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
     tool_distribution: Counter = Counter()
     file_types: Counter = Counter()
     week_counts: Counter = Counter()
+    day_counts: Counter = Counter()
+    month_counts: Counter = Counter()
+
+    # Time-filtered counters (1d, 7d, 30d)
+    tool_dist_1d: Counter = Counter()
+    tool_dist_7d: Counter = Counter()
+    tool_dist_30d: Counter = Counter()
+    projects_1d: Counter = Counter()
+    projects_7d: Counter = Counter()
+    projects_30d: Counter = Counter()
+    file_types_1d: Counter = Counter()
+    file_types_7d: Counter = Counter()
+    file_types_30d: Counter = Counter()
 
     for row in rows:
         total_tools += row["total_tools"]
@@ -288,21 +343,23 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
         # Project actions
         projects[row["project"]] += row["total_actions"] or 0
 
-        # Tool distribution (combined parent+subagent from summary)
+        # Parse tool counts and file extensions for this session
         try:
             tc = json.loads(row["tool_counts_json"] or "{}")
-            for tool, count in tc.items():
-                tool_distribution[tool] += count
         except (json.JSONDecodeError, TypeError):
-            pass
-
-        # File types
+            tc = {}
         try:
             fe = json.loads(row["file_extensions_json"] or "{}")
-            for ext, count in fe.items():
-                file_types[ext] += count
         except (json.JSONDecodeError, TypeError):
-            pass
+            fe = {}
+
+        # Tool distribution (combined parent+subagent from summary)
+        for tool, count in tc.items():
+            tool_distribution[tool] += count
+
+        # File types
+        for ext, count in fe.items():
+            file_types[ext] += count
 
         # Tokens
         try:
@@ -310,19 +367,54 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
             total_input_tokens += tokens.get("input", 0)
             total_output_tokens += tokens.get("output", 0)
             total_cache_read += tokens.get("cache_read", 0)
+            total_cache_creation += tokens.get("cache_creation", 0)
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Weekly timeline
+        # Timeline and time-range filters
         if row["start_time"]:
             try:
                 dt = datetime.fromisoformat(row["start_time"].replace("Z", "+00:00"))
-                # ISO week start (Monday)
+                dt_naive = dt.replace(tzinfo=None)
+
+                # Daily timeline
+                day_counts[dt.date().isoformat()] += 1
+
+                # Weekly timeline (ISO week start = Monday)
                 week_start = dt.date()
                 week_start = week_start.replace(
                     day=week_start.day - week_start.weekday()
                 )
                 week_counts[week_start.isoformat()] += 1
+
+                # Monthly timeline
+                month_counts[dt.strftime("%Y-%m")] += 1
+
+                # Time-range filters: check session age
+                age_days = (now - dt_naive).total_seconds() / 86400
+                actions = row["total_actions"] or 0
+
+                if age_days <= 1:
+                    projects_1d[row["project"]] += actions
+                    for tool, count in tc.items():
+                        tool_dist_1d[tool] += count
+                    for ext, count in fe.items():
+                        file_types_1d[ext] += count
+
+                if age_days <= 7:
+                    projects_7d[row["project"]] += actions
+                    for tool, count in tc.items():
+                        tool_dist_7d[tool] += count
+                    for ext, count in fe.items():
+                        file_types_7d[ext] += count
+
+                if age_days <= 30:
+                    projects_30d[row["project"]] += actions
+                    for tool, count in tc.items():
+                        tool_dist_30d[tool] += count
+                    for ext, count in fe.items():
+                        file_types_30d[ext] += count
+
             except (ValueError, TypeError):
                 pass
 
@@ -333,6 +425,8 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
     # Sort charts
     projects_chart = dict(projects.most_common(15))
     weekly_timeline = dict(sorted(week_counts.items()))
+    daily_timeline = dict(sorted(day_counts.items()))
+    monthly_timeline = dict(sorted(month_counts.items()))
     file_types_chart = dict(Counter(file_types).most_common(15))
     tool_dist = dict(tool_distribution.most_common())
 
@@ -340,12 +434,16 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
         """INSERT OR REPLACE INTO global_aggregates (
             id, generated_at, total_sessions, total_tools, total_actions,
             total_cost, total_input_tokens, total_output_tokens,
-            total_cache_read_tokens, total_active_ms,
+            total_cache_read_tokens, total_cache_creation_tokens, total_active_ms,
             date_range_start, date_range_end, project_count,
             subagent_count, subagent_tools,
             tool_distribution_json, projects_chart_json,
-            weekly_timeline_json, file_types_chart_json, projects_list_json
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            weekly_timeline_json, daily_timeline_json, monthly_timeline_json,
+            file_types_chart_json, projects_list_json,
+            tool_distribution_1d_json, tool_distribution_7d_json, tool_distribution_30d_json,
+            projects_chart_1d_json, projects_chart_7d_json, projects_chart_30d_json,
+            file_types_chart_1d_json, file_types_chart_7d_json, file_types_chart_30d_json
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             datetime.now().isoformat(),
             total_sessions,
@@ -355,6 +453,7 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
             total_input_tokens,
             total_output_tokens,
             total_cache_read,
+            total_cache_creation,
             total_active_ms,
             date_range_start,
             date_range_end,
@@ -364,8 +463,19 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
             json.dumps(tool_dist),
             json.dumps(projects_chart),
             json.dumps(weekly_timeline),
+            json.dumps(daily_timeline),
+            json.dumps(monthly_timeline),
             json.dumps(file_types_chart),
             json.dumps(projects_set),
+            json.dumps(dict(Counter(tool_dist_1d).most_common())),
+            json.dumps(dict(Counter(tool_dist_7d).most_common())),
+            json.dumps(dict(Counter(tool_dist_30d).most_common())),
+            json.dumps(dict(projects_1d.most_common(15))),
+            json.dumps(dict(projects_7d.most_common(15))),
+            json.dumps(dict(projects_30d.most_common(15))),
+            json.dumps(dict(Counter(file_types_1d).most_common(15))),
+            json.dumps(dict(Counter(file_types_7d).most_common(15))),
+            json.dumps(dict(Counter(file_types_30d).most_common(15))),
         ),
     )
     conn.commit()
@@ -389,6 +499,7 @@ def get_overview_payload(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
         "total_input_tokens": row["total_input_tokens"],
         "total_output_tokens": row["total_output_tokens"],
         "total_cache_read_tokens": row["total_cache_read_tokens"],
+        "total_cache_creation_tokens": row["total_cache_creation_tokens"] or 0,
         "total_active_ms": row["total_active_ms"],
         "date_range_start": row["date_range_start"],
         "date_range_end": row["date_range_end"],
@@ -398,8 +509,19 @@ def get_overview_payload(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
         "tool_distribution": json.loads(row["tool_distribution_json"] or "{}"),
         "projects_chart": json.loads(row["projects_chart_json"] or "{}"),
         "weekly_timeline": json.loads(row["weekly_timeline_json"] or "{}"),
+        "daily_timeline": json.loads(row["daily_timeline_json"] or "{}"),
+        "monthly_timeline": json.loads(row["monthly_timeline_json"] or "{}"),
         "file_types_chart": json.loads(row["file_types_chart_json"] or "{}"),
         "projects_list": json.loads(row["projects_list_json"] or "[]"),
+        "tool_distribution_1d": json.loads(row["tool_distribution_1d_json"] or "{}"),
+        "tool_distribution_7d": json.loads(row["tool_distribution_7d_json"] or "{}"),
+        "tool_distribution_30d": json.loads(row["tool_distribution_30d_json"] or "{}"),
+        "projects_chart_1d": json.loads(row["projects_chart_1d_json"] or "{}"),
+        "projects_chart_7d": json.loads(row["projects_chart_7d_json"] or "{}"),
+        "projects_chart_30d": json.loads(row["projects_chart_30d_json"] or "{}"),
+        "file_types_chart_1d": json.loads(row["file_types_chart_1d_json"] or "{}"),
+        "file_types_chart_7d": json.loads(row["file_types_chart_7d_json"] or "{}"),
+        "file_types_chart_30d": json.loads(row["file_types_chart_30d_json"] or "{}"),
     }
 
 

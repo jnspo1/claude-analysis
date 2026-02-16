@@ -448,6 +448,7 @@ def _estimate_cost(
     output_tokens: int,
     cache_read_tokens: int,
     model: Optional[str],
+    cache_creation_tokens: int = 0,
 ) -> float:
     """Estimate cost in USD based on token counts and model pricing.
 
@@ -455,6 +456,7 @@ def _estimate_cost(
       opus:   $15 input, $75 output
       sonnet: $3 input, $15 output
       haiku:  $0.80 input, $4 output
+    Cache creation charged at 125% of input price (write premium).
     Cache reads charged at 10% of input price.
     """
     if not model:
@@ -468,11 +470,13 @@ def _estimate_cost(
         # Default to sonnet pricing
         input_rate, output_rate = 3.0, 15.0
 
+    cache_creation_rate = input_rate * 1.25
     cache_read_rate = input_rate * 0.10
 
     cost = (
         input_tokens * input_rate
         + output_tokens * output_rate
+        + cache_creation_tokens * cache_creation_rate
         + cache_read_tokens * cache_read_rate
     ) / 1_000_000
 
@@ -568,6 +572,7 @@ def build_session_data(
         meta["total_output_tokens"],
         meta["cache_read_tokens"],
         meta["model"],
+        cache_creation_tokens=meta["cache_creation_tokens"],
     )
 
     return {

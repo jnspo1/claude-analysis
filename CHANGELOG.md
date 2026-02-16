@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-16: Token Display Fix and Time-Range Chart Filters
+- **Fixed**: Token card now shows all 4 token types (input + output + cache_creation + cache_read) instead of just input + output. Display changed from misleading "3.2M" to accurate "812M" reflecting true token volume.
+- **Fixed**: Cost estimation now includes cache_creation tokens charged at 125% of input rate, matching Anthropic's actual pricing for cache writes.
+- **Changed**: Token card sub-label shows "active + cached" split instead of "in / out | cache hit %".
+- **Added**: Timeline granularity pills (Daily/Weekly/Monthly) on the Sessions Over Time chart, with pre-computed data for each granularity.
+- **Added**: Time-range filter pills (All/Day/Week/Month) controlling Tool Distribution, Top Projects, and File Types charts simultaneously, with server-side pre-computed filtered variants.
+- **Changed**: Chart rendering refactored to use destroyable instances for dynamic pill-based switching without page reload.
+
 #### 2026-02-16: PWA Home Screen Support
 - **Added**: iPhone home screen icon support with apple-touch-icon link and app title meta tags ("Task Monitor") to enable adding dashboard to iOS home screen. Includes /app_icon.jpg FileResponse endpoint and standalone mode meta tags for fullscreen display without Safari chrome.
 

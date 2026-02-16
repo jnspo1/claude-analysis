@@ -325,7 +325,8 @@ def parse_session_single_pass(
 
     # Cost estimate
     cost_estimate = _estimate_cost(
-        total_input_tokens, total_output_tokens, cache_read_tokens, model
+        total_input_tokens, total_output_tokens, cache_read_tokens, model,
+        cache_creation_tokens=cache_creation_tokens,
     )
 
     return {

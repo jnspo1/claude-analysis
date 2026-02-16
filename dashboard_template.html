@@ -184,11 +184,32 @@
     <div id="rebuildBanner" style="display:none;" class="rebuild-banner">Cache is being built in the background. Data will appear shortly.</div>
     <div class="cards" id="summaryCards"></div>
     <div class="charts-grid">
-      <div class="chart-box"><h3>Tool Distribution</h3><canvas id="toolPieChart"></canvas></div>
+      <div class="chart-box">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <h3 style="margin:0">Tool Distribution</h3>
+          <div class="category-pills" id="rangeChartPills" style="margin:0">
+            <span class="cat-pill active" data-r="all" onclick="switchAllRanges('all')">All</span>
+            <span class="cat-pill" data-r="1d" onclick="switchAllRanges('1d')">Day</span>
+            <span class="cat-pill" data-r="7d" onclick="switchAllRanges('7d')">Week</span>
+            <span class="cat-pill" data-r="30d" onclick="switchAllRanges('30d')">Month</span>
+          </div>
+        </div>
+        <canvas id="toolPieChart"></canvas>
+      </div>
       <div class="chart-box"><h3>Top Projects by Actions</h3><canvas id="projectBarChart"></canvas></div>
     </div>
     <div class="charts-grid">
-      <div class="chart-box"><h3>Sessions Over Time</h3><canvas id="timelineChart"></canvas></div>
+      <div class="chart-box">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <h3 style="margin:0">Sessions Over Time</h3>
+          <div class="category-pills" id="timelinePills" style="margin:0">
+            <span class="cat-pill" data-g="daily" onclick="switchTimeline('daily')">Daily</span>
+            <span class="cat-pill active" data-g="weekly" onclick="switchTimeline('weekly')">Weekly</span>
+            <span class="cat-pill" data-g="monthly" onclick="switchTimeline('monthly')">Monthly</span>
+          </div>
+        </div>
+        <canvas id="timelineChart"></canvas>
+      </div>
       <div class="chart-box"><h3>File Types Touched</h3><canvas id="fileTypeChart"></canvas></div>
     </div>
   </div>
@@ -349,74 +370,111 @@ function renderOverview() {
   const ov = DASHBOARD_DATA.overview;
   if (!ov) return;
 
-  const totalAllTokens = (ov.total_input_tokens || 0) + (ov.total_output_tokens || 0);
-  const cacheEfficiency = ov.total_input_tokens > 0 ? Math.round((ov.total_cache_read_tokens || 0) / (ov.total_input_tokens + (ov.total_cache_read_tokens || 0)) * 100) : 0;
+  const activeTokens = (ov.total_input_tokens || 0) + (ov.total_output_tokens || 0);
+  const cachedTokens = (ov.total_cache_creation_tokens || 0) + (ov.total_cache_read_tokens || 0);
+  const totalAllTokens = activeTokens + cachedTokens;
   const dateRange = (ov.date_range_start && ov.date_range_end) ? `${fmtDate(ov.date_range_start)} - ${fmtDate(ov.date_range_end)}` : 'N/A';
 
   setHtmlById('summaryCards', `
     <div class="card"><div class="label">Sessions</div><div class="value">${ov.total_sessions}</div><div class="sub">${dateRange}</div></div>
     <div class="card"><div class="label">Total Active Time</div><div class="value">${fmtDurationMs(ov.total_active_ms) || 'N/A'}</div><div class="sub">Claude working time across all sessions</div></div>
     <div class="card"><div class="label">Total Actions</div><div class="value">${ov.total_actions.toLocaleString()}</div><div class="sub">${ov.total_tools.toLocaleString()} direct + ${(ov.subagent_tools || 0).toLocaleString()} from ${ov.subagent_count || 0} subagents</div></div>
-    <div class="card"><div class="label">Total Tokens</div><div class="value">${fmtTokenCount(totalAllTokens)}</div><div class="sub">${fmtTokenCount(ov.total_input_tokens)} in / ${fmtTokenCount(ov.total_output_tokens)} out${cacheEfficiency > 0 ? ' | ' + cacheEfficiency + '% cache hit' : ''}</div></div>
+    <div class="card"><div class="label">Total Tokens</div><div class="value">${fmtTokenCount(totalAllTokens)}</div><div class="sub">${fmtTokenCount(activeTokens)} active + ${fmtTokenCount(cachedTokens)} cached</div></div>
     <div class="card"><div class="label">Estimated Cost</div><div class="value">~$${(ov.total_cost || 0).toFixed(2)}</div><div class="sub">${ov.project_count} projects</div></div>
     <div class="card"><div class="label">Subagents Spawned</div><div class="value">${ov.subagent_count || 0}</div></div>
   `);
 
-  // Tool distribution pie (pre-computed)
-  const toolDist = ov.tool_distribution || {};
-  const toolEntries = Object.entries(toolDist).sort((a,b) => b[1]-a[1]);
-  if (toolEntries.length) {
-    new Chart(document.getElementById('toolPieChart'), {
-      type: 'doughnut',
-      data: {
-        labels: toolEntries.map(e => e[0]),
-        datasets: [{ data: toolEntries.map(e => e[1]), backgroundColor: toolEntries.map(e => getToolColor(e[0])), borderWidth: 0 }]
-      },
-      options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 } } } } }
-    });
-  }
+  // Chart instances for dynamic updates
+  window._toolPieInst = null;
+  window._projectBarInst = null;
+  window._timelineInst = null;
+  window._fileTypeInst = null;
 
-  // Projects bar chart (pre-computed)
-  const projChart = ov.projects_chart || {};
-  const projEntries = Object.entries(projChart).sort((a,b) => b[1]-a[1]).slice(0, 10);
-  if (projEntries.length) {
-    new Chart(document.getElementById('projectBarChart'), {
-      type: 'bar',
-      data: {
-        labels: projEntries.map(e => e[0]),
-        datasets: [{ data: projEntries.map(e => e[1]), backgroundColor: '#6c8cff', borderRadius: 4 }]
-      },
-      options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } } } }
-    });
-  }
+  // Render initial charts
+  renderToolPie(ov.tool_distribution || {});
+  renderProjectBar(ov.projects_chart || {});
+  renderTimeline(ov.weekly_timeline || {});
+  renderFileTypes(ov.file_types_chart || {});
+}
 
-  // Timeline chart (pre-computed weekly)
-  const weekData = ov.weekly_timeline || {};
-  const weekEntries = Object.entries(weekData).sort((a,b) => a[0].localeCompare(b[0]));
-  if (weekEntries.length) {
-    new Chart(document.getElementById('timelineChart'), {
-      type: 'line',
-      data: {
-        labels: weekEntries.map(e => fmtDate(e[0])),
-        datasets: [{ data: weekEntries.map(e => e[1]), borderColor: '#6c8cff', backgroundColor: 'rgba(108,140,255,0.1)', fill: true, tension: 0.3, pointRadius: 3 }]
-      },
-      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
-    });
-  }
+function renderToolPie(data) {
+  const entries = Object.entries(data).sort((a,b) => b[1]-a[1]);
+  if (window._toolPieInst) window._toolPieInst.destroy();
+  if (!entries.length) return;
+  window._toolPieInst = new Chart(document.getElementById('toolPieChart'), {
+    type: 'doughnut',
+    data: {
+      labels: entries.map(e => e[0]),
+      datasets: [{ data: entries.map(e => e[1]), backgroundColor: entries.map(e => getToolColor(e[0])), borderWidth: 0 }]
+    },
+    options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#8b8fa3', font: { size: 11 } } } } }
+  });
+}
 
-  // File types chart (pre-computed)
-  const ftData = ov.file_types_chart || {};
-  const extEntries = Object.entries(ftData).sort((a,b) => b[1]-a[1]).slice(0, 12);
-  if (extEntries.length) {
-    new Chart(document.getElementById('fileTypeChart'), {
-      type: 'bar',
-      data: {
-        labels: extEntries.map(e => e[0]),
-        datasets: [{ data: extEntries.map(e => e[1]), backgroundColor: '#a78bfa', borderRadius: 4 }]
-      },
-      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
-    });
-  }
+function renderProjectBar(data) {
+  const entries = Object.entries(data).sort((a,b) => b[1]-a[1]).slice(0, 10);
+  if (window._projectBarInst) window._projectBarInst.destroy();
+  if (!entries.length) return;
+  window._projectBarInst = new Chart(document.getElementById('projectBarChart'), {
+    type: 'bar',
+    data: {
+      labels: entries.map(e => e[0]),
+      datasets: [{ data: entries.map(e => e[1]), backgroundColor: '#6c8cff', borderRadius: 4 }]
+    },
+    options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } } } }
+  });
+}
+
+function renderTimeline(data) {
+  const entries = Object.entries(data).sort((a,b) => a[0].localeCompare(b[0]));
+  if (window._timelineInst) window._timelineInst.destroy();
+  if (!entries.length) return;
+  window._timelineInst = new Chart(document.getElementById('timelineChart'), {
+    type: 'line',
+    data: {
+      labels: entries.map(e => fmtDate(e[0])),
+      datasets: [{ data: entries.map(e => e[1]), borderColor: '#6c8cff', backgroundColor: 'rgba(108,140,255,0.1)', fill: true, tension: 0.3, pointRadius: 3 }]
+    },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8fa3', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3347' } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
+  });
+}
+
+function renderFileTypes(data) {
+  const entries = Object.entries(data).sort((a,b) => b[1]-a[1]).slice(0, 12);
+  if (window._fileTypeInst) window._fileTypeInst.destroy();
+  if (!entries.length) return;
+  window._fileTypeInst = new Chart(document.getElementById('fileTypeChart'), {
+    type: 'bar',
+    data: {
+      labels: entries.map(e => e[0]),
+      datasets: [{ data: entries.map(e => e[1]), backgroundColor: '#a78bfa', borderRadius: 4 }]
+    },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#e1e4ed', font: { size: 11 } }, grid: { display: false } }, y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2e3347' }, beginAtZero: true } } }
+  });
+}
+
+// ---- TIMELINE GRANULARITY PILLS ----
+function switchTimeline(granularity) {
+  const ov = DASHBOARD_DATA.overview;
+  if (!ov) return;
+  const map = { daily: ov.daily_timeline, weekly: ov.weekly_timeline, monthly: ov.monthly_timeline };
+  renderTimeline(map[granularity] || {});
+  document.querySelectorAll('#timelinePills .cat-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.g === granularity);
+  });
+}
+
+// ---- TIME-RANGE FILTER PILLS (Tool Dist, Projects, File Types) ----
+function switchAllRanges(range) {
+  const ov = DASHBOARD_DATA.overview;
+  if (!ov) return;
+  const suffix = range === 'all' ? '' : '_' + range;
+  renderToolPie(ov['tool_distribution' + suffix] || {});
+  renderProjectBar(ov['projects_chart' + suffix] || {});
+  renderFileTypes(ov['file_types_chart' + suffix] || {});
+  document.querySelectorAll('#rangeChartPills .cat-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.r === range);
+  });
 }
 
 // ---- EXPLORER ----
