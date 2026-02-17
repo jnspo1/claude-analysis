@@ -98,4 +98,4 @@ python analyze_permissions.py      # Simulate permission rules
 
 ## UI Design System
 
-Uses the **cool-blue analysis** design system. When building or modifying UI for this project, read `~/.claude/skills/fastapi-ui-analysis-or-functional-apps.md` for the complete design specification (colours, fonts, components, Chart.js theming).
+Theme: **blue** (`<html data-theme="blue">`). Shared CSS: `/shared/pi-design.css`. Skill: `~/.claude/skills/fastapi-ui-design-system.md`.
