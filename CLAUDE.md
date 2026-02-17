@@ -95,3 +95,7 @@ python extract_tool_usage.py       # Extract all tool calls
 python extract_bash_commands.py    # Extract Bash commands
 python analyze_permissions.py      # Simulate permission rules
 ```
+
+## UI Design System
+
+Uses the **cool-blue analysis** design system. When building or modifying UI for this project, read `~/.claude/skills/fastapi-ui-analysis-or-functional-apps.md` for the complete design specification (colours, fonts, components, Chart.js theming).
