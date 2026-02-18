@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from pi_shared.fastapi import make_standard_router
 
 from extract_tool_usage import find_jsonl_files, derive_project_name
 from session_parser import make_project_readable
@@ -164,34 +165,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Claude Activity Dashboard",
-    root_path="/claude_activity",
     lifespan=lifespan,
 )
+
+# Standard health + icon endpoints (from pi_shared)
+ICON_PATH = Path(__file__).parent / "static" / "app_icon.jpg"
+app.include_router(make_standard_router(ICON_PATH))
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-@app.get("/health")
-@app.get("/healthz")
-def healthz():
-    return {
-        "status": "ok",
-        "cached_sessions": get_session_count(get_connection()),
-        "rebuild_in_progress": _rebuild_in_progress,
-    }
-
-
-@app.get("/app_icon.jpg")
-async def app_icon():
-    """Serve the app icon for iPhone Home Screen."""
-    return FileResponse(
-        Path(__file__).parent / "static" / "app_icon.jpg",
-        media_type="image/jpeg",
-        headers={"Cache-Control": "no-cache"},
-    )
-
-
 @app.get("/", response_class=HTMLResponse)
 def dashboard_html():
     """Serve the dashboard HTML with lightweight data injection."""

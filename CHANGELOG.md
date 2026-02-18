@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-19: pi_shared Migration (Health + root_path)
+- **Changed**: Replaced custom `/health`, `/healthz`, and `/app_icon.jpg` handlers with `make_standard_router()` from `pi_shared`. Health endpoints now return standard `{"status": "ok"}` aligned with all other Pi services.
+- **Removed**: Custom health fields (`cached_sessions`, `rebuild_in_progress`) from `/health` response — this diagnostic data remains available via `/api/rebuild-status`.
+- **Removed**: `root_path="/claude_activity"` from FastAPI constructor to fix potential static file 404s through nginx (Starlette 0.50+ bug).
+- **Added**: `pi_shared` as editable dependency in venv.
+
 #### 2026-02-16: Full Recreation Documentation Suite
 - **Added**: `docs/recreation/` directory with 9 comprehensive documents (7,836 lines, ~280KB) enabling complete project recreation from scratch using GitHub Copilot or any AI coding assistant.
 - **Added**: Documentation covers all components: architecture (01), SQLite data layer (02), JSONL parsers (03), tool adapter pattern (04), FastAPI server (05), full HTML/CSS/JS dashboard (06), CLI scripts (07), and deployment (08), plus a master index (00) with build order.
