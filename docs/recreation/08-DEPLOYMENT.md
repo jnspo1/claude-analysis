@@ -1,12 +1,12 @@
 # 08 - Deployment and Infrastructure
 
 This document covers everything needed to deploy the Claude Activity Dashboard as a
-production service on a Raspberry Pi 5 -- from Python dependencies and virtual environments
+production service on a Raspberry Pi 4B -- from Python dependencies and virtual environments
 through systemd service management, nginx reverse proxying, and operational verification.
 It also documents the PWA configuration, input data requirements, performance characteristics,
 and a troubleshooting reference.
 
-**Target environment**: Raspberry Pi 5 (4GB RAM, ARM64), Debian-based OS, Tailscale VPN for
+**Target environment**: Raspberry Pi 4B (4GB RAM, ARM64), Debian-based OS, Tailscale VPN for
 network access. No public internet exposure.
 
 ---
@@ -39,7 +39,7 @@ network access. No public internet exposure.
 
 | Component | Requirement |
 |---|---|
-| Hardware | Raspberry Pi 5 (4GB+ RAM) or any Linux host |
+| Hardware | Raspberry Pi 4B (4GB+ RAM) or any Linux host |
 | OS | Debian-based (Raspberry Pi OS, Ubuntu) |
 | Python | 3.11+ (system Python on Pi OS Bookworm) |
 | nginx | Any recent version (reverse proxy) |
@@ -390,7 +390,7 @@ sudo systemctl reload nginx
 ### Timeout Considerations
 
 The default `proxy_read_timeout` in nginx is 60 seconds. The first cold rebuild of the
-cache takes 8-12 seconds on a Raspberry Pi 5, which is well within this limit. If you
+cache takes 8-12 seconds on a Raspberry Pi 4B, which is well within this limit. If you
 have significantly more JSONL data, consider adding:
 
 ```nginx
@@ -741,7 +741,7 @@ Confirms no rebuild is stuck in progress and shows time since last successful re
 
 ## 13. Performance Characteristics
 
-### Rebuild Times (Raspberry Pi 5, 4GB RAM)
+### Rebuild Times (Raspberry Pi 4B, 4GB RAM)
 
 | Scenario | Time | Description |
 |---|---|---|

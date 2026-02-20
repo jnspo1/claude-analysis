@@ -106,7 +106,7 @@ The dashboard uses a 3-tier caching approach to achieve sub-second response time
 - `file_cache` table stores `(file_path, file_mtime, file_size)` for each JSONL file
 - On rebuild, compare filesystem mtime+size against cached values
 - Only reparse files that are new or changed
-- **Cold rebuild** (all files): ~8-12s on Raspberry Pi 5
+- **Cold rebuild** (all files): ~8-12s on Raspberry Pi 4B
 - **Warm rebuild** (incremental): <1s
 
 ### Tier 2: Pre-computed Aggregates
@@ -327,7 +327,7 @@ Parent session tracks the mapping:
 
 | Metric | Value |
 |--------|-------|
-| Cold rebuild (all files) | ~8-12s (Raspberry Pi 5) |
+| Cold rebuild (all files) | ~8-12s (Raspberry Pi 4B) |
 | Warm rebuild (incremental) | <1s |
 | HTML payload (gzipped) | ~33KB |
 | Overview API response | <10ms |

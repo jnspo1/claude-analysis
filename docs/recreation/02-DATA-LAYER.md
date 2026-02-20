@@ -1140,7 +1140,7 @@ connections close cleanly.
 
 ### 14.3 Memory Considerations
 
-On the Raspberry Pi 5 (4GB RAM), `rebuild_global_aggregates` loads all session summaries
+On the Raspberry Pi 4B (4GB RAM), `rebuild_global_aggregates` loads all session summaries
 into memory at once. With hundreds of sessions, each row is small (the JSON blobs in
 summaries are compact), so this is not a concern. The heavy `session_details` blobs are
 never loaded during aggregation.
