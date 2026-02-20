@@ -17,10 +17,11 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pi_shared.fastapi import make_standard_router
 
 from extract_tool_usage import find_jsonl_files, derive_project_name
@@ -55,10 +56,43 @@ CACHE_TTL_SECONDS = 300  # 5 minutes
 _rebuild_lock = threading.Lock()
 _last_rebuild: float = 0.0
 _rebuild_in_progress = False
-_last_rebuild_stats: Dict[str, Any] = {}
+_last_rebuild_stats: dict[str, Any] = {}
 
 
-def _incremental_rebuild() -> Dict[str, Any]:
+def _parse_stale_files(
+    stale_files, adapters, options,
+) -> tuple:
+    """Parse stale JSONL files and upsert into the DB.
+
+    Returns (parsed_count, error_count).
+    """
+    conn = get_connection()
+    parsed = 0
+    errors = 0
+    try:
+        for jsonl_path in stale_files:
+            project_raw = derive_project_name(jsonl_path, JSONL_ROOT)
+            project = make_project_readable(project_raw)
+
+            try:
+                session = parse_session_single_pass(
+                    jsonl_path, project, adapters, options
+                )
+                if session:
+                    stat = jsonl_path.stat()
+                    upsert_session(conn, str(jsonl_path), session,
+                                   stat.st_mtime, stat.st_size)
+                    parsed += 1
+            except Exception as e:
+                logger.warning("Failed to parse %s: %s", jsonl_path.name, e)
+                errors += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return parsed, errors
+
+
+def _incremental_rebuild() -> dict[str, Any]:
     """Parse only new/changed JSONL files, update SQLite, recompute aggregates."""
     global _last_rebuild, _rebuild_in_progress, _last_rebuild_stats
 
@@ -73,47 +107,22 @@ def _incremental_rebuild() -> Dict[str, Any]:
         adapters = create_adapter_registry()
         options = ExtractionOptions(include_content_previews=True, preview_length=150)
 
-        # Find all session JSONL files (excluding subagent files)
         all_jsonl = find_jsonl_files(JSONL_ROOT)
         session_files = [p for p in all_jsonl if "subagents" not in p.parts]
 
         conn = get_connection()
         try:
             stale_files, current_paths = get_stale_files(conn, session_files)
+        finally:
+            conn.close()
 
-            parsed = 0
-            errors = 0
+        parsed, errors = _parse_stale_files(stale_files, adapters, options)
 
-            for jsonl_path in stale_files:
-                project_raw = derive_project_name(jsonl_path, JSONL_ROOT)
-                project = make_project_readable(project_raw)
-
-                try:
-                    session = parse_session_single_pass(
-                        jsonl_path, project, adapters, options
-                    )
-                    if session:
-                        stat = jsonl_path.stat()
-                        upsert_session(
-                            conn,
-                            str(jsonl_path),
-                            session,
-                            stat.st_mtime,
-                            stat.st_size,
-                        )
-                        parsed += 1
-                except Exception as e:
-                    logger.warning("Failed to parse %s: %s", jsonl_path.name, e)
-                    errors += 1
-
-            # Remove sessions for deleted JSONL files
+        conn = get_connection()
+        try:
             removed = delete_removed_sessions(conn, current_paths)
-
             conn.commit()
-
-            # Recompute global aggregates
             rebuild_global_aggregates(conn)
-
         finally:
             conn.close()
 
@@ -168,8 +177,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Static files (CSS, JS, icon)
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
 # Standard health + icon endpoints (from pi_shared)
-ICON_PATH = Path(__file__).parent / "static" / "app_icon.jpg"
+ICON_PATH = STATIC_DIR / "app_icon.jpg"
 app.include_router(make_standard_router(ICON_PATH))
 
 
@@ -223,7 +236,7 @@ def api_overview():
 
 
 @app.get("/api/sessions")
-def api_sessions(project: Optional[str] = Query(default=None)):
+def api_sessions(project: str | None = Query(default=None)):
     """Lightweight session summaries from SQLite."""
     _ensure_fresh()
     conn = get_connection()

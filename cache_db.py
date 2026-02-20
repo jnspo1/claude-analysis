@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 DB_PATH = Path(__file__).parent / "data" / "cache.db"
 
@@ -165,15 +165,15 @@ def init_db() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 def get_stale_files(
     conn: sqlite3.Connection,
-    jsonl_files: List[Path],
-) -> Tuple[List[Path], Set[str]]:
+    jsonl_files: list[Path],
+) -> tuple[list[Path], set[str]]:
     """Compare filesystem against file_cache, return files needing reparse.
 
     Returns:
         (stale_files, current_paths) - files to reparse and set of all current paths
     """
-    current_paths: Set[str] = set()
-    stale: List[Path] = []
+    current_paths: set[str] = set()
+    stale: list[Path] = []
 
     # Build lookup of cached files
     cached = {}
@@ -206,7 +206,7 @@ def get_stale_files(
 def upsert_session(
     conn: sqlite3.Connection,
     file_path: str,
-    session_data: Dict[str, Any],
+    session_data: dict[str, Any],
     file_mtime: float,
     file_size: int,
 ) -> None:
@@ -271,7 +271,7 @@ def upsert_session(
 
 
 def delete_removed_sessions(
-    conn: sqlite3.Connection, current_paths: Set[str]
+    conn: sqlite3.Connection, current_paths: set[str]
 ) -> int:
     """Remove sessions whose JSONL files no longer exist. Returns count deleted."""
     cached_paths = [
@@ -296,213 +296,223 @@ def delete_removed_sessions(
 
 
 # ---------------------------------------------------------------------------
-# Global aggregates
+# Global aggregates — helpers
 # ---------------------------------------------------------------------------
-def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
-    """Recompute overview aggregates from all session_summaries rows."""
-    rows = conn.execute(
-        """SELECT project, total_tools, total_actions, cost_estimate,
-                  subagent_count, start_time, end_time,
-                  active_duration_ms, total_active_duration_ms,
-                  tool_counts_json, file_extensions_json, tokens_json
-           FROM session_summaries"""
-    ).fetchall()
+def _parse_row_json(raw: str | None, default: str = "{}") -> dict[str, Any]:
+    """Safely parse a JSON string from a DB column."""
+    try:
+        return json.loads(raw or default)
+    except (json.JSONDecodeError, TypeError):
+        return json.loads(default)
 
-    if not rows:
-        conn.execute("DELETE FROM global_aggregates WHERE id = 1")
-        conn.commit()
-        return
 
+def _round_cost_counter(c: Counter, top_n: int = 15) -> dict[str, float]:
+    """Round cost values and keep top N entries for cleaner JSON output."""
+    return {k: round(v, 4) for k, v in c.most_common(top_n)}
+
+
+def _accumulate_session_stats(rows: list) -> dict[str, Any]:
+    """Loop over session rows and accumulate all counters.
+
+    Returns a dict of accumulated stats ready for payload building.
+    """
     now = datetime.now()
+    totals = {
+        "sessions": len(rows), "tools": 0, "actions": 0, "cost": 0.0,
+        "input_tokens": 0, "output_tokens": 0, "cache_read": 0,
+        "cache_creation": 0, "active_ms": 0, "subagents": 0, "subagent_tools": 0,
+    }
+    all_starts: list[str] = []
+    all_ends: list[str] = []
 
-    total_sessions = len(rows)
-    total_tools = 0
-    total_actions = 0
-    total_cost = 0.0
-    total_input_tokens = 0
-    total_output_tokens = 0
-    total_cache_read = 0
-    total_cache_creation = 0
-    total_active_ms = 0
-    total_subagents = 0
-    total_subagent_tools = 0
-
-    all_starts = []
-    all_ends = []
+    # All-time counters
     projects: Counter = Counter()
     tool_distribution: Counter = Counter()
     file_types: Counter = Counter()
-    week_counts: Counter = Counter()
+    cost_by_project: Counter = Counter()
+
+    # Timeline counters
     day_counts: Counter = Counter()
+    week_counts: Counter = Counter()
     month_counts: Counter = Counter()
 
-    # Time-filtered counters (1d, 7d, 30d)
-    tool_dist_1d: Counter = Counter()
-    tool_dist_7d: Counter = Counter()
-    tool_dist_30d: Counter = Counter()
-    projects_1d: Counter = Counter()
-    projects_7d: Counter = Counter()
-    projects_30d: Counter = Counter()
-    file_types_1d: Counter = Counter()
-    file_types_7d: Counter = Counter()
-    file_types_30d: Counter = Counter()
+    # Time-range counters keyed by range name
+    range_counters = {
+        d: {"tools": Counter(), "projects": Counter(),
+            "file_types": Counter(), "cost": Counter()}
+        for d in (1, 7, 30)
+    }
 
-    # Cost by project (all-time + time-filtered)
-    cost_by_project: Counter = Counter()
-    cost_by_project_1d: Counter = Counter()
-    cost_by_project_7d: Counter = Counter()
-    cost_by_project_30d: Counter = Counter()
-
-    # Actions over time: {date_key: {direct: N, subagent: N, total: N}}
-    actions_daily: Dict[str, Dict[str, int]] = {}
-    actions_weekly: Dict[str, Dict[str, int]] = {}
-    actions_monthly: Dict[str, Dict[str, int]] = {}
-
-    # Active time over time: {date_key: total_ms}
-    active_time_daily: Dict[str, int] = {}
-    active_time_weekly: Dict[str, int] = {}
-    active_time_monthly: Dict[str, int] = {}
+    # Actions and active time over time
+    actions_buckets = {"daily": {}, "weekly": {}, "monthly": {}}
+    active_time_buckets = {"daily": {}, "weekly": {}, "monthly": {}}
 
     for row in rows:
-        total_tools += row["total_tools"]
-        total_actions += row["total_actions"]
-        total_cost += row["cost_estimate"] or 0
-        total_subagents += row["subagent_count"] or 0
-        total_subagent_tools += (row["total_actions"] or 0) - (row["total_tools"] or 0)
-        total_active_ms += row["total_active_duration_ms"] or 0
+        totals["tools"] += row["total_tools"]
+        totals["actions"] += row["total_actions"]
+        totals["cost"] += row["cost_estimate"] or 0
+        totals["subagents"] += row["subagent_count"] or 0
+        totals["subagent_tools"] += (row["total_actions"] or 0) - (row["total_tools"] or 0)
+        totals["active_ms"] += row["total_active_duration_ms"] or 0
 
         if row["start_time"]:
             all_starts.append(row["start_time"])
         if row["end_time"]:
             all_ends.append(row["end_time"])
 
-        # Project actions
         projects[row["project"]] += row["total_actions"] or 0
-
-        # Cost by project (all-time)
         cost_by_project[row["project"]] += row["cost_estimate"] or 0
 
-        # Parse tool counts and file extensions for this session
-        try:
-            tc = json.loads(row["tool_counts_json"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            tc = {}
-        try:
-            fe = json.loads(row["file_extensions_json"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            fe = {}
+        tc = _parse_row_json(row["tool_counts_json"])
+        fe = _parse_row_json(row["file_extensions_json"])
 
-        # Tool distribution (combined parent+subagent from summary)
         for tool, count in tc.items():
             tool_distribution[tool] += count
-
-        # File types
         for ext, count in fe.items():
             file_types[ext] += count
 
-        # Tokens
-        try:
-            tokens = json.loads(row["tokens_json"] or "{}")
-            total_input_tokens += tokens.get("input", 0)
-            total_output_tokens += tokens.get("output", 0)
-            total_cache_read += tokens.get("cache_read", 0)
-            total_cache_creation += tokens.get("cache_creation", 0)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        tokens = _parse_row_json(row["tokens_json"])
+        totals["input_tokens"] += tokens.get("input", 0)
+        totals["output_tokens"] += tokens.get("output", 0)
+        totals["cache_read"] += tokens.get("cache_read", 0)
+        totals["cache_creation"] += tokens.get("cache_creation", 0)
 
-        # Timeline and time-range filters
+        # Time-based accumulation
         if row["start_time"]:
-            try:
-                dt = datetime.fromisoformat(row["start_time"].replace("Z", "+00:00"))
-                dt_naive = dt.replace(tzinfo=None)
+            _accumulate_time_stats(
+                row, tc, fe, now, day_counts, week_counts, month_counts,
+                range_counters, actions_buckets, active_time_buckets,
+            )
 
-                # Daily timeline
-                day_counts[dt.date().isoformat()] += 1
+    return {
+        "totals": totals,
+        "all_starts": all_starts,
+        "all_ends": all_ends,
+        "projects": projects,
+        "tool_distribution": tool_distribution,
+        "file_types": file_types,
+        "cost_by_project": cost_by_project,
+        "day_counts": day_counts,
+        "week_counts": week_counts,
+        "month_counts": month_counts,
+        "range_counters": range_counters,
+        "actions_buckets": actions_buckets,
+        "active_time_buckets": active_time_buckets,
+        "projects_set": sorted(set(row["project"] for row in rows)),
+    }
 
-                # Weekly timeline (ISO week start = Monday)
-                week_start = dt.date()
-                week_start = week_start.replace(
-                    day=week_start.day - week_start.weekday()
-                )
-                week_counts[week_start.isoformat()] += 1
 
-                # Monthly timeline
-                month_counts[dt.strftime("%Y-%m")] += 1
+def _accumulate_time_stats(
+    row: Any, tc: dict, fe: dict, now: datetime,
+    day_counts: Counter, week_counts: Counter, month_counts: Counter,
+    range_counters: dict, actions_buckets: dict, active_time_buckets: dict,
+) -> None:
+    """Accumulate timeline and time-range stats for a single row."""
+    try:
+        dt = datetime.fromisoformat(row["start_time"].replace("Z", "+00:00"))
+        dt_naive = dt.replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return
 
-                # Time-range filters: check session age
-                age_days = (now - dt_naive).total_seconds() / 86400
-                actions = row["total_actions"] or 0
+    day_key = dt.date().isoformat()
+    day_counts[day_key] += 1
 
-                if age_days <= 1:
-                    projects_1d[row["project"]] += actions
-                    cost_by_project_1d[row["project"]] += row["cost_estimate"] or 0
-                    for tool, count in tc.items():
-                        tool_dist_1d[tool] += count
-                    for ext, count in fe.items():
-                        file_types_1d[ext] += count
+    week_start = dt.date() - timedelta(days=dt.weekday())
+    week_key = week_start.isoformat()
+    week_counts[week_key] += 1
 
-                if age_days <= 7:
-                    projects_7d[row["project"]] += actions
-                    cost_by_project_7d[row["project"]] += row["cost_estimate"] or 0
-                    for tool, count in tc.items():
-                        tool_dist_7d[tool] += count
-                    for ext, count in fe.items():
-                        file_types_7d[ext] += count
+    month_key = dt.strftime("%Y-%m")
+    month_counts[month_key] += 1
 
-                if age_days <= 30:
-                    projects_30d[row["project"]] += actions
-                    cost_by_project_30d[row["project"]] += row["cost_estimate"] or 0
-                    for tool, count in tc.items():
-                        tool_dist_30d[tool] += count
-                    for ext, count in fe.items():
-                        file_types_30d[ext] += count
+    # Time-range filters
+    age_days = (now - dt_naive).total_seconds() / 86400
+    actions = row["total_actions"] or 0
 
-                # Actions over time (direct, subagent, total)
-                direct = row["total_tools"] or 0
-                subagent = actions - direct
-                day_key = dt.date().isoformat()
-                week_key = week_start.isoformat()
-                month_key = dt.strftime("%Y-%m")
+    for days in (1, 7, 30):
+        if age_days <= days:
+            rc = range_counters[days]
+            rc["projects"][row["project"]] += actions
+            rc["cost"][row["project"]] += row["cost_estimate"] or 0
+            for tool, count in tc.items():
+                rc["tools"][tool] += count
+            for ext, count in fe.items():
+                rc["file_types"][ext] += count
 
-                for bucket, key in [(actions_daily, day_key), (actions_weekly, week_key), (actions_monthly, month_key)]:
-                    if key not in bucket:
-                        bucket[key] = {"direct": 0, "subagent": 0, "total": 0}
-                    bucket[key]["direct"] += direct
-                    bucket[key]["subagent"] += subagent
-                    bucket[key]["total"] += actions
+    # Actions over time
+    direct = row["total_tools"] or 0
+    subagent = actions - direct
+    for bucket_name, key in [("daily", day_key), ("weekly", week_key), ("monthly", month_key)]:
+        bucket = actions_buckets[bucket_name]
+        if key not in bucket:
+            bucket[key] = {"direct": 0, "subagent": 0, "total": 0}
+        bucket[key]["direct"] += direct
+        bucket[key]["subagent"] += subagent
+        bucket[key]["total"] += actions
 
-                # Active time over time
-                active_ms = row["total_active_duration_ms"] or 0
-                for bucket, key in [(active_time_daily, day_key), (active_time_weekly, week_key), (active_time_monthly, month_key)]:
-                    bucket[key] = bucket.get(key, 0) + active_ms
+    # Active time over time
+    active_ms = row["total_active_duration_ms"] or 0
+    for bucket_name, key in [("daily", day_key), ("weekly", week_key), ("monthly", month_key)]:
+        bucket = active_time_buckets[bucket_name]
+        bucket[key] = bucket.get(key, 0) + active_ms
 
-            except (ValueError, TypeError):
-                pass
 
-    date_range_start = min(all_starts) if all_starts else None
-    date_range_end = max(all_ends) if all_ends else None
-    projects_set = sorted(set(row["project"] for row in rows))
+def _build_aggregate_payload(stats: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the aggregate payload dict from accumulated stats."""
+    t = stats["totals"]
+    rc = stats["range_counters"]
 
-    # Sort charts
-    projects_chart = dict(projects.most_common(15))
-    weekly_timeline = dict(sorted(week_counts.items()))
-    daily_timeline = dict(sorted(day_counts.items()))
-    monthly_timeline = dict(sorted(month_counts.items()))
-    file_types_chart = dict(Counter(file_types).most_common(15))
-    tool_dist = dict(tool_distribution.most_common())
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "total_sessions": t["sessions"],
+        "total_tools": t["tools"],
+        "total_actions": t["actions"],
+        "total_cost": round(t["cost"], 4),
+        "total_input_tokens": t["input_tokens"],
+        "total_output_tokens": t["output_tokens"],
+        "total_cache_read_tokens": t["cache_read"],
+        "total_cache_creation_tokens": t["cache_creation"],
+        "total_active_ms": t["active_ms"],
+        "date_range_start": min(stats["all_starts"]) if stats["all_starts"] else None,
+        "date_range_end": max(stats["all_ends"]) if stats["all_ends"] else None,
+        "project_count": len(stats["projects_set"]),
+        "subagent_count": t["subagents"],
+        "subagent_tools": t["subagent_tools"],
+        # All-time charts
+        "tool_distribution": dict(stats["tool_distribution"].most_common()),
+        "projects_chart": dict(stats["projects"].most_common(15)),
+        "weekly_timeline": dict(sorted(stats["week_counts"].items())),
+        "daily_timeline": dict(sorted(stats["day_counts"].items())),
+        "monthly_timeline": dict(sorted(stats["month_counts"].items())),
+        "file_types_chart": dict(stats["file_types"].most_common(15)),
+        "projects_list": stats["projects_set"],
+        # Time-range charts
+        "tool_distribution_1d": dict(Counter(rc[1]["tools"]).most_common()),
+        "tool_distribution_7d": dict(Counter(rc[7]["tools"]).most_common()),
+        "tool_distribution_30d": dict(Counter(rc[30]["tools"]).most_common()),
+        "projects_chart_1d": dict(rc[1]["projects"].most_common(15)),
+        "projects_chart_7d": dict(rc[7]["projects"].most_common(15)),
+        "projects_chart_30d": dict(rc[30]["projects"].most_common(15)),
+        "file_types_chart_1d": dict(rc[1]["file_types"].most_common(15)),
+        "file_types_chart_7d": dict(rc[7]["file_types"].most_common(15)),
+        "file_types_chart_30d": dict(rc[30]["file_types"].most_common(15)),
+        # Cost by project
+        "cost_by_project": _round_cost_counter(stats["cost_by_project"]),
+        "cost_by_project_1d": _round_cost_counter(rc[1]["cost"]),
+        "cost_by_project_7d": _round_cost_counter(rc[7]["cost"]),
+        "cost_by_project_30d": _round_cost_counter(rc[30]["cost"]),
+        # Actions over time
+        "actions_daily": dict(sorted(stats["actions_buckets"]["daily"].items())),
+        "actions_weekly": dict(sorted(stats["actions_buckets"]["weekly"].items())),
+        "actions_monthly": dict(sorted(stats["actions_buckets"]["monthly"].items())),
+        # Active time over time
+        "active_time_daily": dict(sorted(stats["active_time_buckets"]["daily"].items())),
+        "active_time_weekly": dict(sorted(stats["active_time_buckets"]["weekly"].items())),
+        "active_time_monthly": dict(sorted(stats["active_time_buckets"]["monthly"].items())),
+    }
 
-    # Sort actions/active_time dicts by date key
-    actions_daily_sorted = dict(sorted(actions_daily.items()))
-    actions_weekly_sorted = dict(sorted(actions_weekly.items()))
-    actions_monthly_sorted = dict(sorted(actions_monthly.items()))
-    active_time_daily_sorted = dict(sorted(active_time_daily.items()))
-    active_time_weekly_sorted = dict(sorted(active_time_weekly.items()))
-    active_time_monthly_sorted = dict(sorted(active_time_monthly.items()))
 
-    # Round cost values for cleaner JSON
-    def _round_cost_counter(c: Counter) -> dict:
-        return {k: round(v, 4) for k, v in c.most_common(15)}
-
+def _persist_aggregates(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    """Write the aggregate payload to the global_aggregates table."""
     conn.execute(
         """INSERT OR REPLACE INTO global_aggregates (
             id, generated_at, total_sessions, total_tools, total_actions,
@@ -521,56 +531,79 @@ def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
             active_time_daily_json, active_time_weekly_json, active_time_monthly_json
         ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            datetime.now().isoformat(),
-            total_sessions,
-            total_tools,
-            total_actions,
-            round(total_cost, 4),
-            total_input_tokens,
-            total_output_tokens,
-            total_cache_read,
-            total_cache_creation,
-            total_active_ms,
-            date_range_start,
-            date_range_end,
-            len(projects_set),
-            total_subagents,
-            total_subagent_tools,
-            json.dumps(tool_dist),
-            json.dumps(projects_chart),
-            json.dumps(weekly_timeline),
-            json.dumps(daily_timeline),
-            json.dumps(monthly_timeline),
-            json.dumps(file_types_chart),
-            json.dumps(projects_set),
-            json.dumps(dict(Counter(tool_dist_1d).most_common())),
-            json.dumps(dict(Counter(tool_dist_7d).most_common())),
-            json.dumps(dict(Counter(tool_dist_30d).most_common())),
-            json.dumps(dict(projects_1d.most_common(15))),
-            json.dumps(dict(projects_7d.most_common(15))),
-            json.dumps(dict(projects_30d.most_common(15))),
-            json.dumps(dict(Counter(file_types_1d).most_common(15))),
-            json.dumps(dict(Counter(file_types_7d).most_common(15))),
-            json.dumps(dict(Counter(file_types_30d).most_common(15))),
-            json.dumps(_round_cost_counter(cost_by_project)),
-            json.dumps(_round_cost_counter(cost_by_project_1d)),
-            json.dumps(_round_cost_counter(cost_by_project_7d)),
-            json.dumps(_round_cost_counter(cost_by_project_30d)),
-            json.dumps(actions_daily_sorted),
-            json.dumps(actions_weekly_sorted),
-            json.dumps(actions_monthly_sorted),
-            json.dumps(active_time_daily_sorted),
-            json.dumps(active_time_weekly_sorted),
-            json.dumps(active_time_monthly_sorted),
+            payload["generated_at"],
+            payload["total_sessions"],
+            payload["total_tools"],
+            payload["total_actions"],
+            payload["total_cost"],
+            payload["total_input_tokens"],
+            payload["total_output_tokens"],
+            payload["total_cache_read_tokens"],
+            payload["total_cache_creation_tokens"],
+            payload["total_active_ms"],
+            payload["date_range_start"],
+            payload["date_range_end"],
+            payload["project_count"],
+            payload["subagent_count"],
+            payload["subagent_tools"],
+            json.dumps(payload["tool_distribution"]),
+            json.dumps(payload["projects_chart"]),
+            json.dumps(payload["weekly_timeline"]),
+            json.dumps(payload["daily_timeline"]),
+            json.dumps(payload["monthly_timeline"]),
+            json.dumps(payload["file_types_chart"]),
+            json.dumps(payload["projects_list"]),
+            json.dumps(payload["tool_distribution_1d"]),
+            json.dumps(payload["tool_distribution_7d"]),
+            json.dumps(payload["tool_distribution_30d"]),
+            json.dumps(payload["projects_chart_1d"]),
+            json.dumps(payload["projects_chart_7d"]),
+            json.dumps(payload["projects_chart_30d"]),
+            json.dumps(payload["file_types_chart_1d"]),
+            json.dumps(payload["file_types_chart_7d"]),
+            json.dumps(payload["file_types_chart_30d"]),
+            json.dumps(payload["cost_by_project"]),
+            json.dumps(payload["cost_by_project_1d"]),
+            json.dumps(payload["cost_by_project_7d"]),
+            json.dumps(payload["cost_by_project_30d"]),
+            json.dumps(payload["actions_daily"]),
+            json.dumps(payload["actions_weekly"]),
+            json.dumps(payload["actions_monthly"]),
+            json.dumps(payload["active_time_daily"]),
+            json.dumps(payload["active_time_weekly"]),
+            json.dumps(payload["active_time_monthly"]),
         ),
     )
     conn.commit()
 
 
 # ---------------------------------------------------------------------------
+# Global aggregates — main entry point
+# ---------------------------------------------------------------------------
+def rebuild_global_aggregates(conn: sqlite3.Connection) -> None:
+    """Recompute overview aggregates from all session_summaries rows."""
+    rows = conn.execute(
+        """SELECT project, total_tools, total_actions, cost_estimate,
+                  subagent_count, start_time, end_time,
+                  active_duration_ms, total_active_duration_ms,
+                  tool_counts_json, file_extensions_json, tokens_json
+           FROM session_summaries"""
+    ).fetchall()
+
+    if not rows:
+        conn.execute("DELETE FROM global_aggregates WHERE id = 1")
+        conn.commit()
+        return
+
+    stats = _accumulate_session_stats(rows)
+    payload = _build_aggregate_payload(stats)
+    _persist_aggregates(conn, payload)
+
+
+# ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
-def get_overview_payload(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+def get_overview_payload(conn: sqlite3.Connection) -> dict[str, Any] | None:
     """Read pre-computed global aggregates for the overview tab."""
     row = conn.execute("SELECT * FROM global_aggregates WHERE id = 1").fetchone()
     if not row:
@@ -622,8 +655,8 @@ def get_overview_payload(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
 
 
 def get_session_list(
-    conn: sqlite3.Connection, project: Optional[str] = None
-) -> List[Dict[str, Any]]:
+    conn: sqlite3.Connection, project: str | None = None
+) -> list[dict[str, Any]]:
     """Get lightweight session summaries for the dropdown/list."""
     if project:
         rows = conn.execute(
@@ -651,7 +684,7 @@ def get_session_list(
 
 def get_session_detail(
     conn: sqlite3.Connection, session_id: str
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Load full session detail from SQLite."""
     row = conn.execute(
         "SELECT detail_json FROM session_details WHERE session_id = ?",
@@ -662,8 +695,8 @@ def get_session_detail(
     return json.loads(row["detail_json"])
 
 
-def get_projects_list(conn: sqlite3.Connection) -> List[str]:
-    """Get sorted list of all projects."""
+def get_projects_list(conn: sqlite3.Connection) -> list[str]:
+    """Return sorted list of all distinct project names."""
     rows = conn.execute(
         "SELECT DISTINCT project FROM session_summaries ORDER BY project"
     ).fetchall()
@@ -671,6 +704,6 @@ def get_projects_list(conn: sqlite3.Connection) -> List[str]:
 
 
 def get_session_count(conn: sqlite3.Connection) -> int:
-    """Get total number of cached sessions."""
+    """Return total number of cached sessions."""
     row = conn.execute("SELECT COUNT(*) as cnt FROM session_summaries").fetchone()
     return row["cnt"] if row else 0

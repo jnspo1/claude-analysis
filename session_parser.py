@@ -14,7 +14,7 @@ import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Reuse existing extraction infrastructure
 from extract_tool_usage import (
@@ -35,7 +35,7 @@ def _is_interrupt_message(text: str) -> bool:
     )
 
 
-def extract_first_prompt(jsonl_path: Path) -> Optional[str]:
+def extract_first_prompt(jsonl_path: Path) -> str | None:
     """Find the first real user message (not a system/command/interrupt message)."""
     for _lineno, obj in iter_jsonl(jsonl_path):
         if obj is None:
@@ -69,13 +69,13 @@ def extract_first_prompt(jsonl_path: Path) -> Optional[str]:
     return None
 
 
-def extract_user_turns(jsonl_path: Path) -> List[Dict[str, Any]]:
+def extract_user_turns(jsonl_path: Path) -> list[dict[str, Any]]:
     """Extract all user messages with metadata for conversation flow display.
 
     Returns list of dicts with: text, timestamp, is_interrupt, turn_number.
     System/command messages are excluded.
     """
-    turns: List[Dict[str, Any]] = []
+    turns: list[dict[str, Any]] = []
     turn_number = 0
 
     for _lineno, obj in iter_jsonl(jsonl_path):
@@ -121,7 +121,7 @@ def extract_user_turns(jsonl_path: Path) -> List[Dict[str, Any]]:
     return turns
 
 
-def _extract_text_from_content(content) -> Optional[str]:
+def _extract_text_from_content(content: Any) -> str | None:
     """Extract text from message content (handles string and list-of-blocks)."""
     if isinstance(content, str):
         return content
@@ -218,94 +218,78 @@ def count_turns(jsonl_path: Path) -> int:
     return count
 
 
-def extract_session_metadata(jsonl_path: Path) -> Dict[str, Any]:
+def _update_metadata_from_record(state: dict[str, Any], obj: dict) -> None:
+    """Update metadata accumulator state from a single JSONL record."""
+    # Slug can appear on any record
+    if not state["slug"] and obj.get("slug"):
+        state["slug"] = obj["slug"]
+
+    # Track timestamps
+    ts = obj.get("timestamp")
+    if ts:
+        if state["first_ts"] is None:
+            state["first_ts"] = ts
+        state["last_ts"] = ts
+
+    # Active duration from turn_duration system entries
+    if obj.get("type") == "system" and obj.get("subtype") == "turn_duration":
+        state["active_duration_ms"] += obj.get("durationMs", 0)
+
+    # Permission mode (keep last seen)
+    if obj.get("permissionMode"):
+        state["permission_mode"] = obj["permissionMode"]
+
+    # Thinking level (keep last seen)
+    thinking_meta = obj.get("thinkingMetadata")
+    if thinking_meta and "level" in thinking_meta:
+        state["thinking_level"] = thinking_meta["level"]
+
+    _update_usage_from_message(state, obj.get("message") or {})
+
+
+def _update_usage_from_message(state: dict[str, Any], msg: dict) -> None:
+    """Update model, token usage, and tool error counts from a message."""
+    if msg.get("model"):
+        state["models_used"].add(msg["model"])
+        if not state["model"]:
+            state["model"] = msg["model"]
+
+    usage = msg.get("usage")
+    if usage:
+        state["total_input_tokens"] += usage.get("input_tokens", 0)
+        state["total_output_tokens"] += usage.get("output_tokens", 0)
+        state["cache_creation_tokens"] += usage.get("cache_creation_input_tokens", 0)
+        state["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
+
+    content = msg.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                if block.get("is_error"):
+                    state["tool_errors"] += 1
+                else:
+                    state["tool_successes"] += 1
+
+
+def extract_session_metadata(jsonl_path: Path) -> dict[str, Any]:
     """Extract slug, model, timestamps, token usage, and rich metadata."""
-    slug = None
-    model = None
-    first_ts = None
-    last_ts = None
-    total_input_tokens = 0
-    total_output_tokens = 0
-    cache_creation_tokens = 0
-    cache_read_tokens = 0
-    active_duration_ms = 0
-    permission_mode = None
-    tool_errors = 0
-    tool_successes = 0
-    thinking_level = None
-    models_used: set = set()
+    state = {
+        "slug": None, "model": None,
+        "first_ts": None, "last_ts": None,
+        "total_input_tokens": 0, "total_output_tokens": 0,
+        "cache_creation_tokens": 0, "cache_read_tokens": 0,
+        "active_duration_ms": 0, "permission_mode": None,
+        "tool_errors": 0, "tool_successes": 0,
+        "thinking_level": None, "models_used": set(),
+    }
 
     for _lineno, obj in iter_jsonl(jsonl_path):
         if obj is None:
             continue
+        _update_metadata_from_record(state, obj)
 
-        # Slug can appear on any record
-        if not slug and obj.get("slug"):
-            slug = obj["slug"]
-
-        # Track timestamps
-        ts = obj.get("timestamp")
-        if ts:
-            if first_ts is None:
-                first_ts = ts
-            last_ts = ts
-
-        obj_type = obj.get("type")
-
-        # Active duration from turn_duration system entries
-        if obj_type == "system" and obj.get("subtype") == "turn_duration":
-            active_duration_ms += obj.get("durationMs", 0)
-
-        # Permission mode from user entries (keep last seen)
-        if obj.get("permissionMode"):
-            permission_mode = obj["permissionMode"]
-
-        # Thinking level from user entries (keep last seen)
-        thinking_meta = obj.get("thinkingMetadata")
-        if thinking_meta and "level" in thinking_meta:
-            thinking_level = thinking_meta["level"]
-
-        # Model, usage, and cache tokens from assistant messages
-        msg = obj.get("message") or {}
-
-        if msg.get("model"):
-            models_used.add(msg["model"])
-            if not model:
-                model = msg["model"]
-
-        usage = msg.get("usage")
-        if usage:
-            total_input_tokens += usage.get("input_tokens", 0)
-            total_output_tokens += usage.get("output_tokens", 0)
-            cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
-            cache_read_tokens += usage.get("cache_read_input_tokens", 0)
-
-        # Tool errors and successes from tool_result content blocks
-        content = msg.get("content")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    if block.get("is_error"):
-                        tool_errors += 1
-                    else:
-                        tool_successes += 1
-
-    return {
-        "slug": slug,
-        "model": model,
-        "first_ts": first_ts,
-        "last_ts": last_ts,
-        "total_input_tokens": total_input_tokens,
-        "total_output_tokens": total_output_tokens,
-        "cache_creation_tokens": cache_creation_tokens,
-        "cache_read_tokens": cache_read_tokens,
-        "active_duration_ms": active_duration_ms,
-        "permission_mode": permission_mode,
-        "tool_errors": tool_errors,
-        "tool_successes": tool_successes,
-        "thinking_level": thinking_level,
-        "models_used": sorted(models_used),
-    }
+    state["models_used"] = sorted(state["models_used"])
+    return state
 
 
 def extract_active_duration(jsonl_path: Path) -> int:
@@ -319,7 +303,7 @@ def extract_active_duration(jsonl_path: Path) -> int:
     return total
 
 
-def find_subagent_files(jsonl_path: Path) -> List[Path]:
+def find_subagent_files(jsonl_path: Path) -> list[Path]:
     """Find subagent JSONL files for a session.
 
     Session file: <project>/<session-uuid>.jsonl
@@ -332,7 +316,7 @@ def find_subagent_files(jsonl_path: Path) -> List[Path]:
     return sorted(subagents_dir.glob("*.jsonl"))
 
 
-def extract_subagent_info(jsonl_path: Path) -> Dict[str, Dict[str, str]]:
+def extract_subagent_info(jsonl_path: Path) -> dict[str, dict[str, str]]:
     """Extract subagent type and description from parent session's Task tool calls.
 
     Scans the parent JSONL for:
@@ -343,9 +327,9 @@ def extract_subagent_info(jsonl_path: Path) -> Dict[str, Dict[str, str]]:
         {agent_id: {"subagent_type": str, "description": str}}
     """
     # Map tool_use_id -> {subagent_type, description} from Task invocations
-    task_calls: Dict[str, Dict[str, str]] = {}
+    task_calls: dict[str, dict[str, str]] = {}
     # Map parentToolUseID -> agentId from progress records
-    agent_mapping: Dict[str, str] = {}
+    agent_mapping: dict[str, str] = {}
 
     for _lineno, obj in iter_jsonl(jsonl_path):
         if obj is None:
@@ -375,7 +359,7 @@ def extract_subagent_info(jsonl_path: Path) -> Dict[str, Dict[str, str]]:
                 agent_mapping[parent_tool_use_id] = agent_id
 
     # Combine: agent_id -> {subagent_type, description}
-    result: Dict[str, Dict[str, str]] = {}
+    result: dict[str, dict[str, str]] = {}
     for tool_use_id, info in task_calls.items():
         agent_id = agent_mapping.get(tool_use_id)
         if agent_id:
@@ -385,38 +369,45 @@ def extract_subagent_info(jsonl_path: Path) -> Dict[str, Dict[str, str]]:
 
 
 def _get_tool_detail(inv: ToolInvocation) -> str:
-    """Get a human-readable detail string for a tool invocation."""
-    name = inv.tool_name
-    if name == "Bash":
-        cmd = inv.bash_command or ""
-        return cmd[:200] if len(cmd) > 200 else cmd
-    elif name == "Read":
-        return inv.read_file_path or ""
-    elif name == "Write":
-        return inv.write_file_path or ""
-    elif name == "Edit":
-        return inv.edit_file_path or ""
-    elif name == "Grep":
-        path = inv.grep_path or ""
-        pattern = inv.grep_pattern or ""
-        return f"{pattern} in {path}" if path else pattern
-    elif name == "Glob":
-        return inv.glob_pattern or ""
-    elif name == "Task":
-        return inv.task_description_preview or inv.task_subject or ""
-    elif name in ("TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput"):
+    """Return a human-readable detail string for a tool invocation."""
+    extractor = _TOOL_DETAIL_EXTRACTORS.get(inv.tool_name)
+    if extractor:
+        return extractor(inv)
+    # Task management tools share the same pattern
+    if inv.tool_name in ("TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput"):
         return inv.task_subject or inv.task_operation or ""
-    elif name == "WebSearch":
-        return inv.websearch_query or ""
-    elif name == "Skill":
-        return inv.skill_name or ""
-    elif name == "AskUserQuestion":
-        return inv.ask_question_preview or ""
-    else:
-        return inv.raw_input_json[:150] if inv.raw_input_json else ""
+    # Fallback for unknown tools
+    return inv.raw_input_json[:150] if inv.raw_input_json else ""
 
 
-def _get_file_path(inv: ToolInvocation) -> Optional[str]:
+def _bash_detail(inv: ToolInvocation) -> str:
+    """Return truncated bash command string."""
+    cmd = inv.bash_command or ""
+    return cmd[:200] if len(cmd) > 200 else cmd
+
+
+def _grep_detail(inv: ToolInvocation) -> str:
+    """Return grep pattern and path as a combined detail string."""
+    path = inv.grep_path or ""
+    pattern = inv.grep_pattern or ""
+    return f"{pattern} in {path}" if path else pattern
+
+
+_TOOL_DETAIL_EXTRACTORS = {
+    "Bash": _bash_detail,
+    "Read": lambda inv: inv.read_file_path or "",
+    "Write": lambda inv: inv.write_file_path or "",
+    "Edit": lambda inv: inv.edit_file_path or "",
+    "Grep": _grep_detail,
+    "Glob": lambda inv: inv.glob_pattern or "",
+    "Task": lambda inv: inv.task_description_preview or inv.task_subject or "",
+    "WebSearch": lambda inv: inv.websearch_query or "",
+    "Skill": lambda inv: inv.skill_name or "",
+    "AskUserQuestion": lambda inv: inv.ask_question_preview or "",
+}
+
+
+def _get_file_path(inv: ToolInvocation) -> str | None:
     """Get the file path from a file operation invocation."""
     if inv.tool_name == "Read":
         return inv.read_file_path
@@ -428,8 +419,8 @@ def _get_file_path(inv: ToolInvocation) -> Optional[str]:
 
 
 def build_tool_calls_list(
-    invocations: List[ToolInvocation], is_subagent: bool = False
-) -> List[Dict]:
+    invocations: list[ToolInvocation], is_subagent: bool = False
+) -> list[dict[str, Any]]:
     """Convert ToolInvocation list to serializable dicts for the dashboard."""
     calls = []
     for i, inv in enumerate(invocations):
@@ -447,7 +438,7 @@ def _estimate_cost(
     input_tokens: int,
     output_tokens: int,
     cache_read_tokens: int,
-    model: Optional[str],
+    model: str | None,
     cache_creation_tokens: int = 0,
 ) -> float:
     """Estimate cost in USD based on token counts and model pricing.
@@ -483,35 +474,12 @@ def _estimate_cost(
     return round(cost, 4)
 
 
-def build_session_data(
-    jsonl_path: Path,
-    project: str,
-    adapters: Dict,
-    options: ExtractionOptions,
-) -> Optional[Dict]:
-    """Build complete session data dict for one JSONL file."""
-    # Extract tool invocations using existing infrastructure
-    invocations, _ = extract_tools_from_file(jsonl_path, project, adapters, options)
-
-    # Extract session metadata
-    meta = extract_session_metadata(jsonl_path)
-    first_prompt = extract_first_prompt(jsonl_path)
-    turn_count = count_turns(jsonl_path)
-    user_turns = extract_user_turns(jsonl_path)
-    interrupt_count = sum(1 for t in user_turns if t["is_interrupt"])
-
-    # Skip sessions with no tools and no meaningful content
-    if not invocations and not first_prompt:
-        return None
-
-    session_id = jsonl_path.stem
-
-    # Tool counts
+def _build_tool_summary(invocations: list[ToolInvocation]) -> dict[str, Any]:
+    """Build tool counts, file extensions, files touched, and bash summaries."""
     tool_counter = Counter(inv.tool_name for inv in invocations)
 
-    # File extensions and files touched
     file_extensions: Counter = Counter()
-    files_touched: Dict[str, Dict[str, int]] = {}
+    files_touched: dict[str, dict[str, int]] = {}
     for inv in invocations:
         fpath = _get_file_path(inv)
         if fpath:
@@ -521,15 +489,10 @@ def build_session_data(
                 files_touched[fpath] = {}
             files_touched[fpath][inv.tool_name] = files_touched[fpath].get(inv.tool_name, 0) + 1
 
-    # Bash commands aggregation
     bash_cmds: Counter = Counter()
-    bash_bases: Counter = Counter()
     for inv in invocations:
         if inv.tool_name == "Bash" and inv.bash_command:
-            cmd = inv.bash_command.strip()
-            bash_cmds[cmd] += 1
-            base = cmd.split()[0] if cmd.split() else cmd
-            bash_bases[base] += 1
+            bash_cmds[inv.bash_command.strip()] += 1
 
     bash_commands_list = []
     bash_category_counter: Counter = Counter()
@@ -538,17 +501,50 @@ def build_session_data(
         category = categorize_bash_command(cmd)
         bash_category_counter[category] += cnt
         bash_commands_list.append({
-            "command": cmd[:200],
-            "base": base,
-            "count": cnt,
-            "category": category,
+            "command": cmd[:200], "base": base, "count": cnt, "category": category,
         })
-    bash_category_summary = dict(bash_category_counter.most_common())
 
-    # Tool calls chronological list
+    return {
+        "tool_counter": tool_counter,
+        "file_extensions": file_extensions,
+        "files_touched": files_touched,
+        "bash_commands": bash_commands_list,
+        "bash_category_summary": dict(bash_category_counter.most_common()),
+    }
+
+
+def _build_cost_data(meta: dict[str, Any]) -> float:
+    """Compute cost estimate from session metadata."""
+    return _estimate_cost(
+        meta["total_input_tokens"],
+        meta["total_output_tokens"],
+        meta["cache_read_tokens"],
+        meta["model"],
+        cache_creation_tokens=meta["cache_creation_tokens"],
+    )
+
+
+def build_session_data(
+    jsonl_path: Path,
+    project: str,
+    adapters: dict[str, Any],
+    options: ExtractionOptions,
+) -> dict[str, Any] | None:
+    """Build complete session data dict for one JSONL file."""
+    invocations, _ = extract_tools_from_file(jsonl_path, project, adapters, options)
+    meta = extract_session_metadata(jsonl_path)
+    first_prompt = extract_first_prompt(jsonl_path)
+    turn_count = count_turns(jsonl_path)
+    user_turns = extract_user_turns(jsonl_path)
+    interrupt_count = sum(1 for t in user_turns if t["is_interrupt"])
+
+    if not invocations and not first_prompt:
+        return None
+
+    summary = _build_tool_summary(invocations)
     tool_calls = build_tool_calls_list(invocations)
+    cost_estimate = _build_cost_data(meta)
 
-    # Prompt preview (truncated for dropdown display)
     prompt_preview = None
     if first_prompt:
         prompt_preview = first_prompt[:80] + "..." if len(first_prompt) > 80 else first_prompt
@@ -562,21 +558,10 @@ def build_session_data(
         if sa_data:
             subagents.append(sa_data)
 
-    # Calculate total active duration (parent + subagents)
     subagent_active_ms = sum(sa.get("active_duration_ms", 0) for sa in subagents)
-    total_active_duration_ms = meta["active_duration_ms"] + subagent_active_ms
-
-    # Cost estimate
-    cost_estimate = _estimate_cost(
-        meta["total_input_tokens"],
-        meta["total_output_tokens"],
-        meta["cache_read_tokens"],
-        meta["model"],
-        cache_creation_tokens=meta["cache_creation_tokens"],
-    )
 
     return {
-        "session_id": session_id,
+        "session_id": jsonl_path.stem,
         "slug": meta["slug"],
         "project": project,
         "first_prompt": first_prompt,
@@ -586,11 +571,11 @@ def build_session_data(
         "end_time": meta["last_ts"],
         "model": meta["model"],
         "total_tools": len(invocations),
-        "tool_counts": dict(tool_counter.most_common()),
-        "file_extensions": dict(file_extensions.most_common()),
-        "files_touched": files_touched,
-        "bash_commands": bash_commands_list,
-        "bash_category_summary": bash_category_summary,
+        "tool_counts": dict(summary["tool_counter"].most_common()),
+        "file_extensions": dict(summary["file_extensions"].most_common()),
+        "files_touched": summary["files_touched"],
+        "bash_commands": summary["bash_commands"],
+        "bash_category_summary": summary["bash_category_summary"],
         "tool_calls": tool_calls,
         "user_turns": user_turns,
         "interrupt_count": interrupt_count,
@@ -601,7 +586,7 @@ def build_session_data(
             "cache_read": meta["cache_read_tokens"],
         },
         "active_duration_ms": meta["active_duration_ms"],
-        "total_active_duration_ms": total_active_duration_ms,
+        "total_active_duration_ms": meta["active_duration_ms"] + subagent_active_ms,
         "permission_mode": meta["permission_mode"],
         "tool_errors": meta["tool_errors"],
         "tool_successes": meta["tool_successes"],
@@ -615,10 +600,10 @@ def build_session_data(
 def build_subagent_data(
     sa_path: Path,
     project: str,
-    adapters: Dict,
+    adapters: dict[str, Any],
     options: ExtractionOptions,
-    subagent_info: Optional[Dict[str, Dict[str, str]]] = None,
-) -> Optional[Dict]:
+    subagent_info: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any] | None:
     """Build data dict for a single subagent JSONL file."""
     invocations, _ = extract_tools_from_file(sa_path, project, adapters, options)
     if not invocations:
