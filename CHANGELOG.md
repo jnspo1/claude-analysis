@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+#### 2026-02-20: Full Standards Audit and Remediation
+- **Added**: pytest test suite with 154 tests at 60% coverage — covers cache_db, session_parser, single_pass_parser, tool_adapters, API endpoints, analyzers, and extract_bash_commands.
+- **Added**: `tests/` directory with conftest fixtures (tmp_db, sample_jsonl, FastAPI TestClient).
+- **Added**: `static/dashboard.css` and `static/dashboard.js` extracted from template, served via FastAPI StaticFiles mount.
+- **Changed**: Decomposed 11 Python hotspot functions (H1-H11) — `parse_session_single_pass` (323 lines split into 5 functions), `rebuild_global_aggregates` (267 lines split into 4), plus 9 others. All original hotspots reduced in complexity.
+- **Changed**: Replaced all bare typing generics (`Dict`, `List`, `Optional`, `Tuple`, `Set`) with lowercase equivalents (`dict`, `list`, `X | None`, `tuple`, `set`) across 15+ files. Added `from __future__ import annotations` throughout.
+- **Changed**: Dashboard template converted to semantic HTML (`<header>`, `<nav>`, `<main>`, `<section role="tabpanel">`), added ARIA attributes for accessibility, extracted CSS utility classes, and decomposed `showSessionDetail` (168 lines) into 5 focused render functions with JSDoc.
+- **Changed**: Template reduced from 1040 to 143 lines by extracting CSS/JS to static files.
+- **Removed**: `test_heredoc_cleaning.py` demo script (replaced with proper pytest tests).
+
 #### 2026-02-19: pi_shared Migration (Health + root_path)
 - **Changed**: Replaced custom `/health`, `/healthz`, and `/app_icon.jpg` handlers with `make_standard_router()` from `pi_shared`. Health endpoints now return standard `{"status": "ok"}` aligned with all other Pi services.
 - **Removed**: Custom health fields (`cached_sessions`, `rebuild_in_progress`) from `/health` response — this diagnostic data remains available via `/api/rebuild-status`.
